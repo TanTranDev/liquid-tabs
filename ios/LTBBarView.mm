@@ -177,11 +177,23 @@ static UIColor *LTBDefaultLensFill(void)
     _container = [[UIVisualEffectView alloc] initWithEffect:containerEffect];
     [self addSubview:_container];
 
+    // ⚠️ Platter nằm NGOÀI `_container`, KHÔNG phải trong contentView của nó.
+    //
+    // Lý do, lấy nguyên văn từ header `UIGlassEffect.h`: container "render ALL glass
+    // elements in ONE COMBINED view". Mà lens nằm TRỌN trong platter ⇒ hợp nhất hai
+    // hình cho ra đúng hình platter ⇒ lens KHÔNG CÒN hình riêng để phình. Đó là lý do
+    // device 29/07 chỉ thấy một pill phẳng có màu (chính `tintColor` của lens hiện
+    // qua) mà không có khối kính, không có morph — hai lần đoán trước của tôi
+    // (clipsToBounds, rồi bỏ kính dùng UIView) đều không phải gốc.
+    //
+    // Đặt platter ngoài container ⇒ lens là glass element DUY NHẤT trong container ⇒
+    // không có gì hấp thụ nó ⇒ nó giữ hình riêng và `interactive` có chỗ tác dụng.
+    // Hai lớp kính xếp lên nhau đúng như bản Apple: nền kính + khối kính chọn.
     _platter = [[UIVisualEffectView alloc]
         initWithEffect:[UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular]];
     _platter.layer.cornerCurve = kCACornerCurveContinuous;
     _platter.clipsToBounds = YES;
-    [_container.contentView addSubview:_platter];
+    [self insertSubview:_platter belowSubview:_container];
 
     // Vùng chọn = KHỐI KÍNH THẬT, để UIKit tự lo morph. Đây là điểm cốt lõi: hiệu
     // ứng "bóng nước" khi lướt là do UIGlassEffect + UIGlassContainerEffect sinh ra,
