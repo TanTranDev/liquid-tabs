@@ -26,10 +26,21 @@ static const CGFloat kLensSpringDamping = 0.86;
 // Đây KHÔNG phải mô phỏng hiệu ứng: ta chỉ đổi FRAME của một view kính thật, nên phần
 // phình vẫn do UIGlassEffect render — vẫn có tán sắc ở mép, vẫn tràn ra ngoài mép bar
 // (nhờ clipsToBounds = NO). Trigger là của ta, vật liệu là của UIKit.
-static const CGFloat kLensPressGrowX = 10.0;
+/// Nới ngang CHỈ 4pt: bản 0.6.0 nới 10pt làm khối kính trùm sang tab bên cạnh (nhãn
+/// "Activity" và một phần cái chuông nằm lọt trong nó — user báo 29/07).
+static const CGFloat kLensPressGrowX = 4.0;
 static const CGFloat kLensPressGrowY = 9.0;
 static const NSTimeInterval kLensPressDuration = 0.22;
 static const CGFloat kLensPressDamping = 0.72;
+
+/// Trần bán kính. Bán kính = nửa chiều cao trên một khối ~75×70 cho ra hình gần TRÒN,
+/// đọc thành elip chứ không phải capsule ôm ô tab. Chặn trần để giữ dáng squircle.
+static const CGFloat kLensMaxRadius = 26.0;
+
+/// Khoảng NỚI của glass container ra ngoài mỗi mép bar. Phải ≥ `kLensPressGrowY` cộng
+/// dư, nếu không phần khối kính nhô ra vẫn nằm ngoài bounds container ⇒ mất backdrop ⇒
+/// quay lại đúng bug "miếng dán che chữ" của 0.6.0.
+static const CGFloat kContainerPadding = 28.0;
 
 /// Ngưỡng coi là "kéo" thay vì "chạm", để tap không bị hiểu thành vuốt 1px.
 static const CGFloat kDragSlop = 6.0;
@@ -115,6 +126,11 @@ static UIColor *LTBDefaultLensFill(void)
   NSInteger _dragIndex;
   /// Ngón đang đặt trên bar (nhấn giữ HOẶC đang kéo) ⇒ lens ở trạng thái NỞ.
   BOOL _pressed;
+  /// Pan đã nhận diện và chưa kết thúc. Bật ở `.began` (TRƯỚC ngưỡng slop riêng của ta),
+  /// nên nó là cờ duy nhất nói được "cú chạm này đã thành cú vuốt" — `_dragIndex` bật
+  /// muộn hơn nên không dùng thay được: giữa hai mốc đó có cửa sổ mà UIControl bị huỷ
+  /// tracking và ta sẽ hiểu nhầm thành "nhấn rồi bỏ".
+  BOOL _panActive;
 }
 
 + (BOOL)isGlassAvailable
@@ -169,7 +185,18 @@ static UIColor *LTBDefaultLensFill(void)
     // button-trong-scrollview. Nhờ vậy KHÔNG phải tắt userInteractionEnabled của
     // item, tức không mất tap + accessibility của UIControl.
     _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
-    _pan.cancelsTouchesInView = NO;
+    // ⚠️ PHẢI để mặc định YES. Bản 0.6.0 đặt NO (nghĩ rằng cần thế để tap còn hoạt động)
+    // và đó là BUG user báo 29/07: "vuốt từ icon 1 sang icon x thì giật về icon 1 rồi qua
+    // icon x, liên tục, màn hình nháy, lâu dài break app".
+    //
+    // Vì `NO` nên khi pan đã nhận diện, `LTBItemView` (UIControl) VẪN hoàn tất tracking và
+    // vẫn bắn `TouchUpInside` lúc nhả ⇒ MỘT cú vuốt phát HAI lần `onSelect`: một của item
+    // nơi ngón BẮT ĐẦU (icon 1) và một của item cuối dưới ngón (icon X). Mini-app đổi tab
+    // hai lần mỗi cú vuốt ⇒ mount/unmount dây ⇒ nháy màn, và tích lại thì gãy app.
+    //
+    // Với YES, UIKit gửi touchesCancelled cho control ngay khi pan thắng ⇒ không có
+    // TouchUpInside ⇒ đúng một event mỗi cú vuốt. Tap vẫn chạy bình thường vì không có
+    // di chuyển thì pan không bao giờ nhận diện — đúng khuôn button-trong-scrollview.
     [self addGestureRecognizer:_pan];
 
     if (_useGlass) {
@@ -435,27 +462,34 @@ static UIColor *LTBDefaultLensFill(void)
 {
   if (sender.itemKey == nil) return;
   if (![sender.itemKey isEqualToString:[self visualActiveKey]]) {
-    _pendingKey = sender.itemKey;
-    [self reconfigureItems];
+    // Qua `showPendingKey:` (không gán trực tiếp) để watchdog 600ms tự dọn nếu cú chạm
+    // này rốt cuộc không chọn gì — đó là cách self-heal, thay cho việc giật lens về ngay
+    // ở `onItemPressAborted:` (giật ngay sẽ nháy đúng lúc pan vừa thắng).
+    [self showPendingKey:sender.itemKey];
     [self layoutLensAnimated:YES];
   }
   [self setPressed:YES];
 }
 
-/// Ngón rời khỏi item mà KHÔNG chọn (trượt ra ngoài, hoặc hệ huỷ touch).
+/// Ngón rời khỏi item mà KHÔNG chọn (trượt ra ngoài, hoặc hệ huỷ touch — bao gồm lúc pan
+/// thắng, vì `cancelsTouchesInView` = YES).
 - (void)onItemPressAborted:(LTBItemView *)sender
 {
-  // Pan đang chạy ⇒ UIControl bị huỷ tracking là CHUYỆN BÌNH THƯỜNG (đúng khuôn
-  // button-trong-scrollview). Thu lens ở đây sẽ làm nó nháy đúng lúc bắt đầu kéo.
-  if (_dragIndex >= 0) return;
+  // Đang vuốt ⇒ UIControl bị huỷ tracking là CHUYỆN BÌNH THƯỜNG. Thu lens ở đây sẽ làm nó
+  // nháy đúng lúc bắt đầu kéo. Nếu thứ tự event làm cờ chưa kịp bật thì cũng chỉ shrink
+  // 1 frame — `.changed` ngay sau đó bật `_pressed` lại.
+  if (_panActive || _dragIndex >= 0) return;
   [self setPressed:NO];
-  // Không chọn gì ⇒ trả highlight về sự thật, đừng để bar khai một tab chưa được chọn.
-  [self revertPendingKey];
+  // KHÔNG revert ở đây: watchdog của `showPendingKey:` lo phần đó sau 600ms.
 }
 
 - (void)onItemTapped:(LTBItemView *)sender
 {
   if (sender.itemKey == nil) return;
+  // Lưới thứ hai cho bug double-emit: với `cancelsTouchesInView = YES` thì UIKit đã không
+  // gửi TouchUpInside sau khi pan thắng, nhưng tương tác gesture ↔ control là chỗ dễ đổi
+  // hành vi giữa các bản iOS, và giá của việc lọt là app nháy rồi gãy.
+  if (_panActive || _dragIndex >= 0) return;
   [self setPressed:NO];
   // Hiện ngay rồi mới báo JS: chờ vòng bridge thì lens trễ một nhịp so với ngón.
   [self showPendingKey:sender.itemKey];
@@ -486,6 +520,9 @@ static UIColor *LTBDefaultLensFill(void)
   switch (g.state) {
     case UIGestureRecognizerStateBegan:
     case UIGestureRecognizerStateChanged: {
+      // Bật NGAY, trước ngưỡng slop riêng ở dưới: đây là mốc "cú chạm này đã thành cú
+      // vuốt", và `onItemTapped:`/`onItemPressAborted:` đọc nó để không bắn event thứ hai.
+      _panActive = YES;
       // Ngưỡng slop: pan của UIKit đã có ngưỡng riêng, nhưng nó tính theo mọi
       // hướng. Ở đây chỉ quan tâm trục X — kéo dọc (vd vuốt lên để đóng app) không
       // được kéo lens đi ngang.
@@ -507,7 +544,14 @@ static UIColor *LTBDefaultLensFill(void)
     case UIGestureRecognizerStateEnded:
     case UIGestureRecognizerStateCancelled:
     case UIGestureRecognizerStateFailed: {
-      if (_dragIndex < 0) return;  // chưa vượt slop ⇒ đây là tap, để UIControl lo
+      _panActive = NO;
+      if (_dragIndex < 0) {
+        // Pan có nhận diện nhưng chưa vượt slop trục X (vd vuốt dọc) ⇒ không chọn gì.
+        // Phải thu lens ở đây: UIControl đã bị huỷ tracking nên `onItemPressAborted:`
+        // đã chạy và bị cờ `_panActive` chặn — không ai thu hộ.
+        [self setPressed:NO];
+        return;
+      }
       NSString *key = _items[(NSUInteger)_dragIndex].itemKey ?: @"";
       _dragIndex = -1;
       // Nhả tay ⇒ thu về. Gán thẳng cờ (không qua `setPressed:`) rồi để
@@ -533,12 +577,27 @@ static UIColor *LTBDefaultLensFill(void)
   [super layoutSubviews];
   const CGRect b = self.bounds;
 
-  _container.frame = b;
+  // ⚠️ Container được nới RỘNG HƠN bar, không bằng bar.
+  //
+  // `UIVisualEffectView` chỉ lấy backdrop TRONG bounds của chính nó. Bản trước đặt
+  // `_container.frame = b` nên phần khối kính nhô ra ngoài khung bar không có gì để
+  // khúc xạ ⇒ UIKit đổ màu phẳng và CHE nội dung. Đo được trên clip user gửi 29/07:
+  // dòng chữ chạy qua mép blob bị XOÁ MẤT — không nhoè, không lệch — trong khi cùng
+  // frame đó, chữ chạy qua mép PLATTER thì nhoè và mờ đúng như vật liệu kính. Tức
+  // kính có hoạt động, chỉ blob là không có backdrop.
+  //
+  // Nới container ra ngoài `self` được vì subview vẫn render ngoài bounds của
+  // superview khi `clipsToBounds = NO` (đã NO ở init). Và KHÔNG ăn thêm touch nào:
+  // hit-test đi qua `self` trước, mà `self` vẫn đúng khung platter — điểm ngoài
+  // `self.bounds` không bao giờ tới được subview.
+  _container.frame = CGRectInset(b, -kContainerPadding, -kContainerPadding);
   _platter.frame = b;
   _platter.layer.cornerRadius = _cornerRadius;
   _fallbackBg.frame = b;
   _fallbackBg.layer.cornerRadius = _cornerRadius;
-  _itemsHost.frame = b;
+  // itemsHost sống trong contentView của container (nhánh kính) nên phải bù đúng
+  // khoảng nới, nếu không icon lệch lên trên-trái đúng `kContainerPadding`.
+  _itemsHost.frame = _container != nil ? CGRectOffset(b, kContainerPadding, kContainerPadding) : b;
 
   const NSUInteger n = _items.count;
   if (n == 0) return;
@@ -549,15 +608,28 @@ static UIColor *LTBDefaultLensFill(void)
   [self layoutLensAnimated:NO];
 }
 
+/// Lệch hệ toạ độ giữa item và lens.
+///
+/// Item frame nằm trong hệ của `_itemsHost`; lens nằm trong `contentView` của container.
+/// Nhánh kính: itemsHost đã bị dịch `kContainerPadding` ⇒ lens phải dịch đúng bằng thế.
+/// Nhánh fallback: lens là con của `self`, itemsHost cũng ở `self.bounds` ⇒ lệch 0.
+- (CGFloat)lensSpaceOffset
+{
+  return _container != nil ? kContainerPadding : 0.0;
+}
+
 - (UIView *_Nullable)activeLens
 {
   return _lens;
 }
 
 /// Hình nghỉ của lens tại một item — CHƯA tính trạng thái nhấn.
+/// Trả về trong hệ toạ độ CỦA LENS (đã bù `lensSpaceOffset`), không phải hệ của item.
 - (CGRect)lensRestRectForIndex:(NSInteger)idx
 {
-  return CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
+  const CGRect r = CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
+  const CGFloat o = [self lensSpaceOffset];
+  return CGRectOffset(r, o, o);
 }
 
 /// Hình lens THỰC TẾ: hình nghỉ, nở thêm nếu ngón đang đặt trên bar.
@@ -602,7 +674,9 @@ static UIColor *LTBDefaultLensFill(void)
 /// lúc kéo lens bị bẹp dọc — giữ radius cũ sẽ ra hình viên thuốc méo.
 - (void)applyCapsuleRadiusTo:(UIView *)lens
 {
-  lens.layer.cornerRadius = lens.bounds.size.height / 2.0;
+  // Chặn trần: nửa chiều cao trên khối đã nở (~70pt) cho ra hình gần TRÒN, đọc thành
+  // elip chứ không phải capsule ôm ô tab (user báo 29/07).
+  lens.layer.cornerRadius = MIN(kLensMaxRadius, lens.bounds.size.height / 2.0);
 }
 
 /// Lens ĐI THEO NGÓN. Chỉ đổi VỊ TRÍ, giữ nguyên kích thước.
@@ -623,9 +697,12 @@ static UIColor *LTBDefaultLensFill(void)
   // Tâm dính ngón. Kẹp theo hình NGHỈ, không theo hình đã nở: phần nở CỐ Ý được tràn ra
   // ngoài mép bar — đó là cả điểm của hiệu ứng.
   const CGRect rest = [self lensRestRectForIndex:_dragIndex];
-  const CGFloat minCX = kLensInsetX + rest.size.width / 2.0;
-  const CGFloat maxCX = self.bounds.size.width - kLensInsetX - rest.size.width / 2.0;
-  const CGFloat cx = MAX(minCX, MIN(maxCX, x));
+  const CGFloat o = [self lensSpaceOffset];
+  // `x` là toạ độ trong `self`; lens ở hệ khác ⇒ phải bù, nếu không lens lệch đúng
+  // `kContainerPadding` so với ngón.
+  const CGFloat minCX = o + kLensInsetX + rest.size.width / 2.0;
+  const CGFloat maxCX = o + self.bounds.size.width - kLensInsetX - rest.size.width / 2.0;
+  const CGFloat cx = MAX(minCX, MIN(maxCX, x + o));
 
   lens.hidden = NO;
   lens.frame = CGRectMake(cx - r.size.width / 2.0, r.origin.y, r.size.width, r.size.height);
