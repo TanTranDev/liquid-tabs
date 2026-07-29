@@ -1,5 +1,6 @@
 #import "LiquidTabsModule.h"
 #import "LTBBarView.h"
+#import "LTBSystemBar.h"
 
 #import <UIKit/UIKit.h>
 
@@ -45,6 +46,14 @@ static UIWindow *_Nullable LTBKeyWindow(void)
   NSLayoutConstraint *_trailingC;
   NSLayoutConstraint *_bottomC;
   BOOL _visible;
+
+  /// Bar HỆ THỐNG (`UITabBarController`) — đường CHÍNH trên iOS 26. Xem `LTBSystemBar.h`
+  /// về lý do không tự vẽ nữa. `nil` trên máy dưới ngưỡng ⇒ rơi về `_bar` vẽ tay.
+  LTBSystemBar *_systemBar;
+  /// Chốt MỘT LẦN ở lần dùng đầu. Không hỏi lại mỗi lệnh: nếu giá trị đổi giữa các lệnh
+  /// (vd probe lỗi nhất thời) thì hai nhánh sẽ cùng sống và có HAI thanh bar trên màn.
+  BOOL _useSystemBarResolved;
+  BOOL _useSystemBar;
 }
 
 RCT_EXPORT_MODULE(LiquidTabs)
@@ -89,11 +98,46 @@ RCT_EXPORT_MODULE(LiquidTabs)
   return _bar;
 }
 
-- (void)onMain:(void (^)(LTBBarView *bar))block
+/// Chọn nhánh MỘT LẦN rồi giữ nguyên suốt phiên. Hỏi lại mỗi lệnh là đường sinh HAI
+/// thanh bar cùng lúc nếu probe trả khác nhau giữa các lần gọi.
+- (BOOL)useSystemBar
+{
+  if (!_useSystemBarResolved) {
+    _useSystemBar = [LTBSystemBar isSupported];
+    _useSystemBarResolved = YES;
+  }
+  return _useSystemBar;
+}
+
+- (LTBSystemBar *_Nullable)ensureSystemBar
+{
+  UIWindow *window = LTBKeyWindow();
+  if (window == nil) return nil;
+  if (_systemBar == nil) {
+    _systemBar = [LTBSystemBar new];
+    __weak __typeof(self) weakSelf = self;
+    _systemBar.onSelect = ^(NSString *key) {
+      [weakSelf emitOnTabSelected:@{@"key" : key}];
+    };
+    [_systemBar setVisible:_visible animated:NO];
+  }
+  [_systemBar attachToWindow:window];
+  return _systemBar;
+}
+
+/// Điều phối duy nhất: đưa ĐÚNG MỘT trong hai nhánh, nhánh kia là nil. Mọi lệnh của spec
+/// đi qua đây để không có lệnh nào lỡ chỉ hiện thực một nhánh — đó là kiểu lỗi im lặng
+/// (một nền tảng mất tính năng mà không ai báo).
+- (void)route:(void (^)(LTBSystemBar *_Nullable sys, LTBBarView *_Nullable bar))block
 {
   dispatch_block_t work = ^{
+    if ([self useSystemBar]) {
+      LTBSystemBar *sys = [self ensureSystemBar];
+      if (sys != nil) block(sys, nil);
+      return;
+    }
     LTBBarView *bar = [self ensureBar];
-    if (bar != nil) block(bar);
+    if (bar != nil) block(nil, bar);
   };
   if (NSThread.isMainThread) {
     work();
@@ -130,7 +174,11 @@ RCT_EXPORT_MODULE(LiquidTabs)
     if (((NSString *)out[@"key"]).length == 0) continue;  // không key ⇒ không tap được
     [clean addObject:out];
   }
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      [sys setItems:clean];
+      return;
+    }
     [bar setItems:clean];
   }];
 }
@@ -138,7 +186,11 @@ RCT_EXPORT_MODULE(LiquidTabs)
 - (void)setActive:(NSString *)key
 {
   NSString *k = [key isKindOfClass:NSString.class] ? key : @"";
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      [sys setActiveKey:k];
+      return;
+    }
     [bar setActiveKey:k];
   }];
 }
@@ -146,7 +198,11 @@ RCT_EXPORT_MODULE(LiquidTabs)
 - (void)setVisible:(BOOL)visible animated:(BOOL)animated
 {
   _visible = visible;
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      [sys setVisible:visible animated:animated];
+      return;
+    }
     if (!animated) {
       bar.hidden = !visible;
       bar.alpha = visible ? 1.0 : 0.0;
@@ -170,7 +226,13 @@ RCT_EXPORT_MODULE(LiquidTabs)
         bottomInset:(double)bottomInset
        cornerRadius:(double)cornerRadius
 {
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      // Bar hệ thống tự định vị và tự bo góc theo chuẩn iOS 26 — ép geometry vào nó là
+      // đường làm mất chính hiệu ứng ta vừa đổi kiến trúc để lấy. Nhận rồi bỏ qua, KHÔNG
+      // ném lỗi: phía gọi dùng cùng một đoạn code cho mọi nền tảng.
+      return;
+    }
     self->_heightC.constant = height;
     self->_leadingC.constant = horizontalInset;
     self->_trailingC.constant = -horizontalInset;
@@ -184,7 +246,11 @@ RCT_EXPORT_MODULE(LiquidTabs)
 {
   UIColor *a = LTBColorFromHex(activeHex);
   UIColor *i = LTBColorFromHex(inactiveHex);
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      [sys setTintActive:a inactive:i];
+      return;
+    }
     [bar setTintActive:a inactive:i];
   }];
 }
@@ -192,15 +258,22 @@ RCT_EXPORT_MODULE(LiquidTabs)
 - (void)setLensColor:(NSString *)hex
 {
   UIColor *c = LTBColorFromHex(hex);
-  [self onMain:^(LTBBarView *bar) {
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    if (sys != nil) {
+      // Capsule chọn của bar hệ thống KHÔNG có API công khai để đổi màu, và mọi cách ép
+      // qua `UITabBarAppearance` đều làm mất luôn capsule (nhiều báo cáo forum Apple).
+      // Nhận rồi bỏ qua.
+      return;
+    }
     [bar setLensColor:c];
   }];
 }
 
 - (void)setMergeSpacing:(double)spacing
 {
-  [self onMain:^(LTBBarView *bar) {
-    [bar setMergeSpacing:spacing];
+  [self route:^(LTBSystemBar *sys, LTBBarView *bar) {
+    // Bar hệ thống tự lo merge — không có gì để đặt.
+    if (sys == nil) [bar setMergeSpacing:spacing];
   }];
 }
 

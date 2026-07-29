@@ -26,21 +26,28 @@ static const CGFloat kLensSpringDamping = 0.86;
 // Đây KHÔNG phải mô phỏng hiệu ứng: ta chỉ đổi FRAME của một view kính thật, nên phần
 // phình vẫn do UIGlassEffect render — vẫn có tán sắc ở mép, vẫn tràn ra ngoài mép bar
 // (nhờ clipsToBounds = NO). Trigger là của ta, vật liệu là của UIKit.
-/// Nới ngang CHỈ 4pt: bản 0.6.0 nới 10pt làm khối kính trùm sang tab bên cạnh (nhãn
-/// "Activity" và một phần cái chuông nằm lọt trong nó — user báo 29/07).
+/// Lens nở khi nhấn — nhưng CHỈ trong lòng platter, không vượt ra ngoài.
+///
+/// Hai bản trước cho lens vượt khỏi khung bar để "tràn ra ngoài", và cả hai lần phần
+/// vượt đó render thành MIẾNG DÁN phẳng che nội dung (device 29/07). Cái tạo ra vẻ
+/// "tràn" ở bản Apple là thứ khác: CẢ THANH BAR phóng to (xem `kBarPressScale`). Nhờ vậy
+/// khối kính đi ra ngoài đường viền CŨ của bar mà vẫn luôn nằm trong khung của chính nó
+/// ⇒ luôn có backdrop ⇒ luôn là kính thật.
 static const CGFloat kLensPressGrowX = 4.0;
-static const CGFloat kLensPressGrowY = 9.0;
-static const NSTimeInterval kLensPressDuration = 0.22;
-static const CGFloat kLensPressDamping = 0.72;
+static const CGFloat kLensPressGrowY = 5.0;
+static const NSTimeInterval kLensPressDuration = 0.24;
+static const CGFloat kLensPressDamping = 0.74;
 
-/// Trần bán kính. Bán kính = nửa chiều cao trên một khối ~75×70 cho ra hình gần TRÒN,
-/// đọc thành elip chứ không phải capsule ôm ô tab. Chặn trần để giữ dáng squircle.
+/// Trần bán kính. Bán kính = nửa chiều cao cho ra hình gần TRÒN trên khối đã nở, đọc
+/// thành elip chứ không phải capsule ôm ô tab (user báo 29/07).
 static const CGFloat kLensMaxRadius = 26.0;
 
-/// Khoảng NỚI của glass container ra ngoài mỗi mép bar. Phải ≥ `kLensPressGrowY` cộng
-/// dư, nếu không phần khối kính nhô ra vẫn nằm ngoài bounds container ⇒ mất backdrop ⇒
-/// quay lại đúng bug "miếng dán che chữ" của 0.6.0.
-static const CGFloat kContainerPadding = 28.0;
+/// Khi nhấn, TOÀN BỘ bar phóng to (user chỉ ra 29/07 — đây là mảnh còn thiếu). Dùng
+/// `transform` trên chính bar view nên platter, lens và icon phóng CÙNG NHAU: mọi thứ
+/// vẫn nằm trong khung của nó, chỉ là khung đó lớn hơn ⇒ không có chỗ nào mất backdrop.
+/// Transform áp SAU layout nên không đụng gì tới Auto Layout của host, và
+/// `locationInView:` vẫn trả toạ độ trong hệ bounds chưa transform ⇒ toán vuốt không đổi.
+static const CGFloat kBarPressScale = 1.06;
 
 /// Ngưỡng coi là "kéo" thay vì "chạm", để tap không bị hiểu thành vuốt 1px.
 static const CGFloat kDragSlop = 6.0;
@@ -577,27 +584,22 @@ static UIColor *LTBDefaultLensFill(void)
   [super layoutSubviews];
   const CGRect b = self.bounds;
 
-  // ⚠️ Container được nới RỘNG HƠN bar, không bằng bar.
+  // ⚠️ Container = ĐÚNG khung bar. ĐỪNG nới ra ngoài.
   //
-  // `UIVisualEffectView` chỉ lấy backdrop TRONG bounds của chính nó. Bản trước đặt
-  // `_container.frame = b` nên phần khối kính nhô ra ngoài khung bar không có gì để
-  // khúc xạ ⇒ UIKit đổ màu phẳng và CHE nội dung. Đo được trên clip user gửi 29/07:
-  // dòng chữ chạy qua mép blob bị XOÁ MẤT — không nhoè, không lệch — trong khi cùng
-  // frame đó, chữ chạy qua mép PLATTER thì nhoè và mờ đúng như vật liệu kính. Tức
-  // kính có hoạt động, chỉ blob là không có backdrop.
+  // Bản 0.7.0 nới 28pt mỗi mép với giả thuyết "phần khối kính nhô ra ngoài không có
+  // backdrop nên bị đổ màu phẳng". Đã thử trên device 29/07: KHÔNG ăn — phần tràn vẫn
+  // phẳng, và còn tệ hơn (thành một panel tối đặc thò ra ngoài mép bar). Giả thuyết đó
+  // SAI, hoặc chưa đủ; đừng thử lại theo hướng này mà không có bằng chứng mới.
   //
-  // Nới container ra ngoài `self` được vì subview vẫn render ngoài bounds của
-  // superview khi `clipsToBounds = NO` (đã NO ở init). Và KHÔNG ăn thêm touch nào:
-  // hit-test đi qua `self` trước, mà `self` vẫn đúng khung platter — điểm ngoài
-  // `self.bounds` không bao giờ tới được subview.
-  _container.frame = CGRectInset(b, -kContainerPadding, -kContainerPadding);
+  // Sự thật đã đo được, giữ làm mốc: lens render ĐÚNG vật liệu kính khi nó nằm TRONG
+  // khung bar (user duyệt bản 0.5.0: "hiệu ứng đúng rồi"); chỉ phần VƯỢT RA NGOÀI khung
+  // mới thành phẳng và che nội dung.
+  _container.frame = b;
   _platter.frame = b;
   _platter.layer.cornerRadius = _cornerRadius;
   _fallbackBg.frame = b;
   _fallbackBg.layer.cornerRadius = _cornerRadius;
-  // itemsHost sống trong contentView của container (nhánh kính) nên phải bù đúng
-  // khoảng nới, nếu không icon lệch lên trên-trái đúng `kContainerPadding`.
-  _itemsHost.frame = _container != nil ? CGRectOffset(b, kContainerPadding, kContainerPadding) : b;
+  _itemsHost.frame = b;
 
   const NSUInteger n = _items.count;
   if (n == 0) return;
@@ -608,28 +610,18 @@ static UIColor *LTBDefaultLensFill(void)
   [self layoutLensAnimated:NO];
 }
 
-/// Lệch hệ toạ độ giữa item và lens.
-///
-/// Item frame nằm trong hệ của `_itemsHost`; lens nằm trong `contentView` của container.
-/// Nhánh kính: itemsHost đã bị dịch `kContainerPadding` ⇒ lens phải dịch đúng bằng thế.
-/// Nhánh fallback: lens là con của `self`, itemsHost cũng ở `self.bounds` ⇒ lệch 0.
-- (CGFloat)lensSpaceOffset
-{
-  return _container != nil ? kContainerPadding : 0.0;
-}
-
 - (UIView *_Nullable)activeLens
 {
   return _lens;
 }
 
 /// Hình nghỉ của lens tại một item — CHƯA tính trạng thái nhấn.
-/// Trả về trong hệ toạ độ CỦA LENS (đã bù `lensSpaceOffset`), không phải hệ của item.
+///
+/// Không cần bù hệ toạ độ: container đúng khung bar và `_itemsHost` đúng `self.bounds`,
+/// nên hệ của item trùng hệ của lens. (Bản 0.7.0 nới container nên phải bù — đã bỏ.)
 - (CGRect)lensRestRectForIndex:(NSInteger)idx
 {
-  const CGRect r = CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
-  const CGFloat o = [self lensSpaceOffset];
-  return CGRectOffset(r, o, o);
+  return CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
 }
 
 /// Hình lens THỰC TẾ: hình nghỉ, nở thêm nếu ngón đang đặt trên bar.
@@ -656,6 +648,9 @@ static UIColor *LTBDefaultLensFill(void)
   // nở/thu quanh nó — nếu không, nhấn xuống sẽ làm lens nhảy về giữa ô.
   const CGFloat cx = CGRectGetMidX(lens.frame);
   const CGRect target = [self lensRectForIndex:idx];
+  const CGAffineTransform barT =
+      pressed ? CGAffineTransformMakeScale(kBarPressScale, kBarPressScale)
+              : CGAffineTransformIdentity;
   [UIView animateWithDuration:kLensPressDuration
                         delay:0
        usingSpringWithDamping:kLensPressDamping
@@ -663,6 +658,8 @@ static UIColor *LTBDefaultLensFill(void)
                       options:UIViewAnimationOptionAllowUserInteraction |
                               UIViewAnimationOptionBeginFromCurrentState
                    animations:^{
+                     // Cả bar phóng to — mảnh chính của hiệu ứng, xem `kBarPressScale`.
+                     self.transform = barT;
                      lens.frame = CGRectMake(cx - target.size.width / 2.0, target.origin.y,
                                              target.size.width, target.size.height);
                      [self applyCapsuleRadiusTo:lens];
@@ -694,15 +691,11 @@ static UIColor *LTBDefaultLensFill(void)
 
   // Đang kéo ⇒ luôn ở trạng thái NỞ (`lensRectForIndex:` lo phần đó).
   const CGRect r = [self lensRectForIndex:_dragIndex];
-  // Tâm dính ngón. Kẹp theo hình NGHỈ, không theo hình đã nở: phần nở CỐ Ý được tràn ra
-  // ngoài mép bar — đó là cả điểm của hiệu ứng.
-  const CGRect rest = [self lensRestRectForIndex:_dragIndex];
-  const CGFloat o = [self lensSpaceOffset];
-  // `x` là toạ độ trong `self`; lens ở hệ khác ⇒ phải bù, nếu không lens lệch đúng
-  // `kContainerPadding` so với ngón.
-  const CGFloat minCX = o + kLensInsetX + rest.size.width / 2.0;
-  const CGFloat maxCX = o + self.bounds.size.width - kLensInsetX - rest.size.width / 2.0;
-  const CGFloat cx = MAX(minCX, MIN(maxCX, x + o));
+  // Tâm dính ngón, kẹp theo hình ĐÃ NỞ để lens không vượt khỏi platter — phần vượt ra
+  // ngoài khung render thành miếng dán phẳng (đã gặp 2 lần trên device).
+  const CGFloat minCX = kLensInsetX + r.size.width / 2.0;
+  const CGFloat maxCX = self.bounds.size.width - kLensInsetX - r.size.width / 2.0;
+  const CGFloat cx = maxCX < minCX ? self.bounds.size.width / 2.0 : MAX(minCX, MIN(maxCX, x));
 
   lens.hidden = NO;
   lens.frame = CGRectMake(cx - r.size.width / 2.0, r.origin.y, r.size.width, r.size.height);
@@ -723,9 +716,16 @@ static UIColor *LTBDefaultLensFill(void)
     return;
   }
   const CGRect target = [self lensRectForIndex:idx];
+  // Transform của bar đồng bộ NGAY TẠI ĐÂY, cùng chỗ với frame của lens: hàm này là
+  // đường mà mọi nguồn (setActive, tap, nhả vuốt, layoutSubviews) đều đi qua, nên đặt ở
+  // đây là cách chắc chắn không có đường nào phóng bar mà quên thu.
+  const CGAffineTransform barT =
+      _pressed ? CGAffineTransformMakeScale(kBarPressScale, kBarPressScale)
+               : CGAffineTransformIdentity;
   lens.hidden = NO;
 
   if (!animated) {
+    self.transform = barT;
     lens.frame = target;
     [self applyCapsuleRadiusTo:lens];
     return;
@@ -737,9 +737,10 @@ static UIColor *LTBDefaultLensFill(void)
                       options:UIViewAnimationOptionAllowUserInteraction |
                               UIViewAnimationOptionBeginFromCurrentState
                    animations:^{
+                     self.transform = barT;
                      lens.frame = target;
                      // Trong khối animation ⇒ cornerRadius nội suy cùng frame; gán
-                     // ngoài khối thì hình bẹp của lúc kéo nhảy về capsule tức thì.
+                     // ngoài khối thì hình của lúc kéo nhảy về capsule tức thì.
                      [self applyCapsuleRadiusTo:lens];
                    }
                    completion:nil];
