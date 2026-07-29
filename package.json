@@ -1,16 +1,15 @@
 {
   "name": "@tantrancover/liquid-tabs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Floating Liquid Glass tab bar for iOS 26+ (bar only) — built on public UIGlassEffect / UIGlassContainerEffect. Host provides the native view; mini-apps consume it as a Module Federation shared singleton.",
   "license": "UNLICENSED",
   "private": false,
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
   "react-native": "src/index.ts",
   "source": "src/index.ts",
   "files": [
     "src",
-    "lib",
     "ios",
     "tantrancover-liquid-tabs.podspec",
     "README.md"
@@ -18,8 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "jest",
-    "prepare": "npm run build"
+    "test": "jest"
   },
   "peerDependencies": {
     "react": ">=19.0.0",
