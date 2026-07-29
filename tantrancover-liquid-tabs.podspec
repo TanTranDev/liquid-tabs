@@ -8,14 +8,16 @@ Pod::Spec.new do |s|
   s.summary      = package["description"]
   s.license      = package["license"]
   s.authors      = { "Tan Tran" => "ton@f8a.io" }
-  s.homepage     = "https://github.com/tantrancover/liquid-tabs"
+  s.homepage     = "https://github.com/TanTranDev/liquid-tabs"
 
   # RN 0.85 tối thiểu 15.1. Toàn bộ code Liquid Glass nằm trong @available(iOS 26)
   # nên build được cho target thấp; dưới 26 thì view không dựng kính (wrapper JS
   # đã chặn trước bằng isLiquidTabBarAvailable).
   s.platforms    = { :ios => "15.1" }
 
-  s.source       = { :git => "https://github.com/tantrancover/liquid-tabs.git", :tag => "v#{s.version}" }
+  # URL chuẩn, KHÔNG dùng alias SSH per-máy (máy tác giả có alias
+  # `github-tantrandev`) — podspec đi theo package sang mọi máy/CI.
+  s.source       = { :git => "https://github.com/TanTranDev/liquid-tabs.git", :tag => "v#{s.version}" }
   s.source_files = "ios/**/*.{h,m,mm,cpp}"
 
   # Kéo React-Core + codegen + Folly… theo đúng cấu hình New Architecture của app

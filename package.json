@@ -42,7 +42,7 @@
   },
   "codegenConfig": {
     "name": "liquidtabs",
-    "type": "components",
+    "type": "all",
     "jsSrcsDir": "./src/specs",
     "ios": {
       "componentProvider": {
