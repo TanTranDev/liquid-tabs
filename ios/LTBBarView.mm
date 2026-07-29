@@ -15,6 +15,22 @@ static const CGFloat kLensSpringDamping = 0.86;
 // UIGlassContainerEffect là "khoảng cách mà các phần tử BẮT ĐẦU hợp nhất" — rất có
 // thể UIKit đang hợp nhất lens vào platter, tức lens tan vào nền. Chưa phân định
 // được trên máy; `setMergeSpacing` là núm xoay để thử (0 = không hợp nhất).
+// ── NỞ KHI NHẤN (yêu cầu USER 29/07, chốt phạm vi: nở ngay lúc ngón đụng, GIỮ suốt
+// lúc nhấn và lúc kéo, thu về khi nhả).
+//
+// Vì sao ta tự đổi kích thước thay vì để `UIGlassEffect.interactive` tự lo: `interactive`
+// chỉ phản ứng khi CHÍNH view kính nhận được touch, mà ở bar này icon (`_itemsHost`) nằm
+// TRÊN lens và ăn hết touch, còn pan thì gắn trên `self` ⇒ lens không bao giờ nhận một
+// touch nào ⇒ không có gì để nó phản ứng.
+//
+// Đây KHÔNG phải mô phỏng hiệu ứng: ta chỉ đổi FRAME của một view kính thật, nên phần
+// phình vẫn do UIGlassEffect render — vẫn có tán sắc ở mép, vẫn tràn ra ngoài mép bar
+// (nhờ clipsToBounds = NO). Trigger là của ta, vật liệu là của UIKit.
+static const CGFloat kLensPressGrowX = 10.0;
+static const CGFloat kLensPressGrowY = 9.0;
+static const NSTimeInterval kLensPressDuration = 0.22;
+static const CGFloat kLensPressDamping = 0.72;
+
 /// Ngưỡng coi là "kéo" thay vì "chạm", để tap không bị hiểu thành vuốt 1px.
 static const CGFloat kDragSlop = 6.0;
 /// Nếu phía JS không xác nhận lựa chọn trong khoảng này, trả highlight về sự thật.
@@ -97,6 +113,8 @@ static UIColor *LTBDefaultLensFill(void)
   NSString *_pendingKey;
   /// Index dưới ngón trong lúc kéo; -1 = không kéo.
   NSInteger _dragIndex;
+  /// Ngón đang đặt trên bar (nhấn giữ HOẶC đang kéo) ⇒ lens ở trạng thái NỞ.
+  BOOL _pressed;
 }
 
 + (BOOL)isGlassAvailable
@@ -380,6 +398,12 @@ static UIColor *LTBDefaultLensFill(void)
   while (_items.count < count) {
     LTBItemView *v = [LTBItemView new];
     [v addTarget:self action:@selector(onItemTapped:) forControlEvents:UIControlEventTouchUpInside];
+    // TouchDown là nguồn DUY NHẤT bắt được "ngón vừa đụng" cho cú TAP: pan chỉ nhận diện
+    // sau khi ngón đã đi quá ngưỡng, nên nếu chỉ dựa vào pan thì tap không bao giờ nở.
+    [v addTarget:self action:@selector(onItemPressDown:) forControlEvents:UIControlEventTouchDown];
+    [v addTarget:self
+                action:@selector(onItemPressAborted:)
+      forControlEvents:UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     [_itemsHost addSubview:v];
     [_items addObject:v];
   }
@@ -405,9 +429,34 @@ static UIColor *LTBDefaultLensFill(void)
   }
 }
 
+/// Ngón vừa đụng một item: nở NGAY, và dời lens sang ô đó luôn (lạc quan) để phản hồi
+/// không trễ một vòng bridge.
+- (void)onItemPressDown:(LTBItemView *)sender
+{
+  if (sender.itemKey == nil) return;
+  if (![sender.itemKey isEqualToString:[self visualActiveKey]]) {
+    _pendingKey = sender.itemKey;
+    [self reconfigureItems];
+    [self layoutLensAnimated:YES];
+  }
+  [self setPressed:YES];
+}
+
+/// Ngón rời khỏi item mà KHÔNG chọn (trượt ra ngoài, hoặc hệ huỷ touch).
+- (void)onItemPressAborted:(LTBItemView *)sender
+{
+  // Pan đang chạy ⇒ UIControl bị huỷ tracking là CHUYỆN BÌNH THƯỜNG (đúng khuôn
+  // button-trong-scrollview). Thu lens ở đây sẽ làm nó nháy đúng lúc bắt đầu kéo.
+  if (_dragIndex >= 0) return;
+  [self setPressed:NO];
+  // Không chọn gì ⇒ trả highlight về sự thật, đừng để bar khai một tab chưa được chọn.
+  [self revertPendingKey];
+}
+
 - (void)onItemTapped:(LTBItemView *)sender
 {
   if (sender.itemKey == nil) return;
+  [self setPressed:NO];
   // Hiện ngay rồi mới báo JS: chờ vòng bridge thì lens trễ một nhịp so với ngón.
   [self showPendingKey:sender.itemKey];
   [self layoutLensAnimated:YES];
@@ -442,6 +491,9 @@ static UIColor *LTBDefaultLensFill(void)
       // được kéo lens đi ngang.
       if (_dragIndex < 0 && fabs([g translationInView:self].x) < kDragSlop) return;
       _dragIndex = idx;
+      // Kéo cũng là "ngón đang đặt trên bar" ⇒ giữ trạng thái NỞ. Đặt trước
+      // `layoutLensFollowingX:` để frame đầu tiên của cú kéo đã là hình nở.
+      _pressed = YES;
       NSString *key = _items[(NSUInteger)idx].itemKey ?: @"";
       // Highlight đi theo ngón NGAY, nhưng KHÔNG báo JS (USER chốt: đổi màn khi nhả).
       // Dùng pending thay vì _activeKey để không tự ý ghi sự thật.
@@ -458,6 +510,10 @@ static UIColor *LTBDefaultLensFill(void)
       if (_dragIndex < 0) return;  // chưa vượt slop ⇒ đây là tap, để UIControl lo
       NSString *key = _items[(NSUInteger)_dragIndex].itemKey ?: @"";
       _dragIndex = -1;
+      // Nhả tay ⇒ thu về. Gán thẳng cờ (không qua `setPressed:`) rồi để
+      // `layoutLensAnimated:` vẽ một animation DUY NHẤT vừa dời chỗ vừa thu — hai
+      // animation chồng nhau ở đây sẽ giật.
+      _pressed = NO;
       // Huỷ/thất bại cũng CHỐT theo ô cuối dưới ngón: người dùng đã thấy highlight ở
       // đó, trả về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
       [self showPendingKey:key];
@@ -498,10 +554,48 @@ static UIColor *LTBDefaultLensFill(void)
   return _lens;
 }
 
-/// Hình nghỉ của lens tại một item.
+/// Hình nghỉ của lens tại một item — CHƯA tính trạng thái nhấn.
 - (CGRect)lensRestRectForIndex:(NSInteger)idx
 {
   return CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
+}
+
+/// Hình lens THỰC TẾ: hình nghỉ, nở thêm nếu ngón đang đặt trên bar.
+/// Một nguồn duy nhất cho cả ba đường (nghỉ · nhấn giữ · kéo) — tính nở ở từng chỗ gọi
+/// là cách chắc chắn để một đường quên nở mà không ai thấy.
+- (CGRect)lensRectForIndex:(NSInteger)idx
+{
+  const CGRect rest = [self lensRestRectForIndex:idx];
+  if (!_pressed) return rest;
+  return CGRectInset(rest, -kLensPressGrowX, -kLensPressGrowY);
+}
+
+/// Đổi trạng thái nhấn rồi vẽ lại lens. Không đổi ⇒ không làm gì (tránh animation dư
+/// khi UIControl bắn TouchDown nhiều lần).
+- (void)setPressed:(BOOL)pressed
+{
+  if (_pressed == pressed) return;
+  _pressed = pressed;
+  UIView *lens = [self activeLens];
+  if (lens == nil || lens.hidden) return;
+  const NSInteger idx = _dragIndex >= 0 ? _dragIndex : [self activeIndex];
+  if (idx < 0) return;
+  // Giữ nguyên TÂM đang có (lúc kéo, tâm dính ngón chứ không phải tâm ô nghỉ) và chỉ
+  // nở/thu quanh nó — nếu không, nhấn xuống sẽ làm lens nhảy về giữa ô.
+  const CGFloat cx = CGRectGetMidX(lens.frame);
+  const CGRect target = [self lensRectForIndex:idx];
+  [UIView animateWithDuration:kLensPressDuration
+                        delay:0
+       usingSpringWithDamping:kLensPressDamping
+        initialSpringVelocity:0
+                      options:UIViewAnimationOptionAllowUserInteraction |
+                              UIViewAnimationOptionBeginFromCurrentState
+                   animations:^{
+                     lens.frame = CGRectMake(cx - target.size.width / 2.0, target.origin.y,
+                                             target.size.width, target.size.height);
+                     [self applyCapsuleRadiusTo:lens];
+                   }
+                   completion:nil];
 }
 
 /// Capsule: bo góc luôn bằng nửa chiều cao HIỆN TẠI. Phải gán mỗi lần đổi frame vì
@@ -524,15 +618,17 @@ static UIColor *LTBDefaultLensFill(void)
   UIView *lens = [self activeLens];
   if (lens == nil || _dragIndex < 0) return;
 
+  // Đang kéo ⇒ luôn ở trạng thái NỞ (`lensRectForIndex:` lo phần đó).
+  const CGRect r = [self lensRectForIndex:_dragIndex];
+  // Tâm dính ngón. Kẹp theo hình NGHỈ, không theo hình đã nở: phần nở CỐ Ý được tràn ra
+  // ngoài mép bar — đó là cả điểm của hiệu ứng.
   const CGRect rest = [self lensRestRectForIndex:_dragIndex];
-  // Tâm dính ngón, kẹp để lens không trượt khỏi hai đầu bar.
   const CGFloat minCX = kLensInsetX + rest.size.width / 2.0;
   const CGFloat maxCX = self.bounds.size.width - kLensInsetX - rest.size.width / 2.0;
   const CGFloat cx = MAX(minCX, MIN(maxCX, x));
 
   lens.hidden = NO;
-  lens.frame = CGRectMake(cx - rest.size.width / 2.0, rest.origin.y, rest.size.width,
-                          rest.size.height);
+  lens.frame = CGRectMake(cx - r.size.width / 2.0, r.origin.y, r.size.width, r.size.height);
   [self applyCapsuleRadiusTo:lens];
 }
 
@@ -549,7 +645,7 @@ static UIColor *LTBDefaultLensFill(void)
     lens.hidden = YES;
     return;
   }
-  const CGRect target = [self lensRestRectForIndex:idx];
+  const CGRect target = [self lensRectForIndex:idx];
   lens.hidden = NO;
 
   if (!animated) {
