@@ -117,6 +117,10 @@ static UIColor *LTBDefaultLensFill(void)
   NSMutableArray<LTBItemView *> *_items;
   NSArray<NSDictionary<NSString *, NSString *> *> *_itemProps;
   NSString *_activeKey;
+  /// Số `onSelect` đã bắn mà JS chưa trả lời — lọc ECHO LẠC HẬU. Giữ giống
+  /// `LTBSystemBar::_outstandingEchoes` (lý do dài ở `setActiveKey:` bên đó): lệch nhánh ở
+  /// đúng cơ chế này là lỗi im lặng, vì mỗi máy chỉ chạy một nhánh.
+  NSUInteger _outstandingEchoes;
   UIColor *_tintActive;
   UIColor *_tintInactive;
   CGFloat _cornerRadius;
@@ -316,14 +320,31 @@ static UIColor *LTBDefaultLensFill(void)
 - (void)setActiveKey:(NSString *)key
 {
   NSString *next = key ?: @"";
+  // `had`/`changed` PHẢI tính trước khi ghi `_activeKey`.
   const BOOL had = _activeKey.length > 0;
   const BOOL changed = ![next isEqualToString:_activeKey];
-  // JS đã lên tiếng ⇒ sự thật về lại tay nó, dù giá trị có đổi hay không. Huỷ luôn
-  // watchdog: nó chỉ tồn tại cho trường hợp JS IM LẶNG.
+  // BẤT BIẾN: ghi `_activeKey` TRƯỚC guard echo lạc hậu. Ghi sau thì ca "JS phủ quyết" gãy
+  // vĩnh viễn — echo phủ quyết bị guard bỏ qua, watchdog revert về một tab CỔ, và JS không
+  // đổi `active` nữa nên không còn echo nào tới sửa.
+  _activeKey = next;
+
+  // ECHO LẠC HẬU — cùng bug, cùng cách chặn với `LTBSystemBar::setActiveKey:` (xem giải thích
+  // dài ở đó). Bản trước xoá `_pendingKey` + huỷ watchdog VÔ ĐIỀU KIỆN ngay đầu hàm, nên câu
+  // trả lời của một cú tap đã bị cú tap sau thay thế vẫn kéo lens về tab người ta vừa bỏ:
+  // tap item 1 → tap item 2 → echo(1) về trước ⇒ lens "về lại item 1". Nhánh này còn có
+  // vuốt-để-chọn nên guard phủ luôn ca vuốt-rồi-vuốt-lại.
+  if (_outstandingEchoes > 0) _outstandingEchoes--;
+  if (_pendingKey.length > 0 &&
+      (_outstandingEchoes > 0 || ![next isEqualToString:_pendingKey])) {
+    return;
+  }
+
+  // JS đã trả lời đúng cú tap mới nhất ⇒ sự thật về lại tay nó. Huỷ watchdog: nó chỉ tồn tại
+  // cho trường hợp JS IM LẶNG.
   const BOOL wasPending = _pendingKey.length > 0;
+  _outstandingEchoes = 0;
   _pendingKey = @"";
   [self cancelPendingRevert];
-  _activeKey = next;
   if (!changed && !wasPending) return;
   [self reconfigureItems];
   // Đang kéo thì KHÔNG giật lens về: ngón vẫn đang giữ nó. `setActive` có thể tới
@@ -360,13 +381,18 @@ static UIColor *LTBDefaultLensFill(void)
 {
   if (_pendingKey.length == 0) return;
   _pendingKey = @"";
+  // Reset bộ đếm ở đây là thứ chặn drift của nó (re-tap bắn `onSelect` mà JS không echo lại
+  // ⇒ đếm dư). Nhờ vậy lệch chỉ sống trong một cửa sổ `kPendingRevertDelay`.
+  _outstandingEchoes = 0;
   [self reconfigureItems];
   if (_dragIndex < 0) [self layoutLensAnimated:YES];
 }
 
 - (void)dealloc
 {
-  // `performSelector:afterDelay:` giữ target — không huỷ là view chết vẫn bị gọi.
+  // `performSelector:afterDelay:` RETAIN target ⇒ không có đường gọi vào view đã chết: còn
+  // perform treo thì `dealloc` chưa chạy được. Huỷ ở đây chỉ để view không bị neo sống thêm
+  // 600 ms. (Bản trước viết ngược nửa sau — xem cùng chỗ ở `LTBSystemBar.mm`.)
   [self cancelPendingRevert];
 }
 
@@ -501,7 +527,13 @@ static UIColor *LTBDefaultLensFill(void)
   // Hiện ngay rồi mới báo JS: chờ vòng bridge thì lens trễ một nhịp so với ngón.
   [self showPendingKey:sender.itemKey];
   [self layoutLensAnimated:YES];
-  if (self.onSelect != nil) self.onSelect(sender.itemKey);
+  // Đếm NGAY TRƯỚC khi bắn, trong cùng nhánh — xem `_outstandingEchoes`. Đếm ở
+  // `showPendingKey:` sẽ lệch pha, vì có đường chỉ hiện pending mà không báo JS (kéo ngang
+  // trong `onPan`).
+  if (self.onSelect != nil) {
+    _outstandingEchoes++;
+    self.onSelect(sender.itemKey);
+  }
 }
 
 #pragma mark - Vuốt để chọn
@@ -569,7 +601,10 @@ static UIColor *LTBDefaultLensFill(void)
       // đó, trả về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
       [self showPendingKey:key];
       [self layoutLensAnimated:YES];
-      if (self.onSelect != nil && key.length > 0) self.onSelect(key);
+      if (self.onSelect != nil && key.length > 0) {
+        _outstandingEchoes++;
+        self.onSelect(key);
+      }
       break;
     }
     default:

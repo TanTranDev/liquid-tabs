@@ -4,6 +4,20 @@
 /// là MỘT dấu cách; đổi ở một bên là mất chấm im lặng, nên bên JS có test ghim giá trị.
 static NSString *const kBadgeDotSentinel = @" ";
 
+/// Trễ watchdog trả `_pendingKey` về sự thật của JS khi JS IM LẶNG (mini-app từ chối đổi
+/// tab, hoặc không ai nghe `onSelect`).
+///
+/// Giá trị này nhân bản ở BA nhánh và không có cách kiểm bằng máy (3 ngôn ngữ, 2 nền tảng)
+/// — guard duy nhất là ba comment trỏ chéo nhau, nên đổi một chỗ thì đổi cả ba:
+/// `LTBBarView.mm::kPendingRevertDelay` (iOS vẽ tay) · `LTBBarView.kt::PENDING_REVERT_MS`
+/// (Android, 600L). Lệch nhau thì cùng một cú tap cho hai hành vi khác nhau tuỳ máy — loại
+/// lệch rất khó truy vì mỗi máy chỉ chạy một nhánh.
+///
+/// "0,6 s" là xấp xỉ: `performSelector:afterDelay:` chỉ schedule ở `NSDefaultRunLoopMode`,
+/// nên trong lúc user đang scroll (`UITrackingRunLoopMode`) nó bị hoãn. Chấp nhận được vì
+/// đây là lưới sửa-sai, không phải cam kết thời gian — nhưng đừng đọc con số này thành SLA.
+static const NSTimeInterval kPendingRevertDelay = 0.6;
+
 #pragma mark - Passthrough
 
 /// Chứa `UITabBarController` nhưng CHỈ nhận touch trong vùng thanh bar.
@@ -61,6 +75,23 @@ static NSString *const kBadgeDotSentinel = @" ";
   NSArray<NSString *> *_keys;
   NSArray<NSDictionary<NSString *, NSString *> *> *_itemProps;
   NSString *_activeKey;
+  /// Tab UIKit ĐANG hiển thị sau một cú tap, trong lúc chờ JS xác nhận. Khác `_activeKey`
+  /// đúng bằng độ dài của vòng bridge. Không có nó thì `setItems:` (badge/avatar đổi) chạy
+  /// `syncSelection` với `_activeKey` CŨ và kéo bar về tab trước — đúng bug "bấm tab, nháy
+  /// về tab cũ rồi mới sang". Hai nhánh còn lại (`LTBBarView.mm`, `LTBBarView.kt`) đã có
+  /// cơ chế này từ đầu; nó bị bỏ sót khi chuyển sang `UITabBarController`.
+  NSString *_pendingKey;
+  /// Bật trong lúc TA gán `selectedIndex`. Lưới cho khả năng UIKit gọi
+  /// `didSelectViewController:` cả khi selection do code đặt: nếu điều đó xảy ra mà không
+  /// chặn, mỗi lần sync sẽ bắn thêm một `onSelect` về JS ⇒ JS đổi state ⇒ sync tiếp ⇒ bar
+  /// dao động qua lại. Legacy `viewControllers` được cho là chỉ gọi delegate khi USER tap,
+  /// nhưng giá của việc điều đó đổi giữa các bản iOS là app nháy liên tục.
+  BOOL _applyingSelection;
+  /// Số `onSelect` đã bắn mà JS chưa trả lời. Lọc echo lạc hậu theo SỐ LƯỢNG thay vì theo giá
+  /// trị key — xem lý do dài ở `setActiveKey:`. Có thể đếm dư khi re-tap (re-tap không sinh
+  /// echo), nhưng `revertPendingKey` reset về 0 nên lệch luôn bị chặn trong một cửa sổ
+  /// `kPendingRevertDelay`.
+  NSUInteger _outstandingEchoes;
   UIColor *_tintActive;
   UIColor *_tintInactive;
   BOOL _visible;
@@ -88,6 +119,7 @@ static NSString *const kBadgeDotSentinel = @" ";
     _keys = @[];
     _itemProps = @[];
     _activeKey = @"";
+    _pendingKey = @"";
     _visible = NO;
     _imageCache = [NSCache new];
     _imageCache.countLimit = 8;
@@ -174,7 +206,14 @@ static NSString *const kBadgeDotSentinel = @" ";
 
   _keys = keys;
   if (![_tbc.viewControllers isEqualToArray:vcs]) {
+    // Bọc `_applyingSelection` y như chỗ gán `selectedIndex`: đây là lần ghi selection
+    // programmatic THỨ HAI. Gán `viewControllers` mà VC đang chọn bị loại khỏi danh sách
+    // thì UIKit tự đặt `selectedIndex = 0` — đúng loại "selection do code" mà cờ tồn tại
+    // để không báo về JS. Che một chỗ mà hở chỗ kia là lưới nửa vời: nó gãy đúng theo kiểu
+    // "trông vẫn đúng", ở vùng chỉ sửa được bằng rebuild native.
+    _applyingSelection = YES;
     _tbc.viewControllers = vcs;
+    _applyingSelection = NO;
   }
   [self syncSelection];
 }
@@ -243,27 +282,151 @@ static NSString *const kBadgeDotSentinel = @" ";
 
 - (void)setActiveKey:(NSString *)key
 {
-  _activeKey = key ?: @"";
+  NSString *next = key ?: @"";
+  // BẤT BIẾN: ghi `_activeKey` TRƯỚC guard bên dưới, không phải sở thích sắp xếp. Nếu chỉ ghi
+  // sau khi đã nhận echo khớp thì ca "JS phủ quyết" gãy VĨNH VIỄN: echo phủ quyết bị guard bỏ
+  // qua, `_activeKey` giữ giá trị trước cú tap, watchdog revert bar về một tab CỔ, và vì
+  // `active` phía JS không đổi nữa nên không còn echo nào tới sửa.
+  _activeKey = next;
+
+  // ECHO LẠC HẬU. Mỗi cú tap gửi một `onSelect` rồi chờ JS trả lời; tap tiếp theo tạo cú
+  // chờ MỚI trong khi câu trả lời của cú trước còn đang trên đường về. Tin câu trả lời cũ
+  // là kéo bar về tab người ta đã bỏ:
+  //
+  //   tap item 1 → emit(Chats) · tap item 2 → emit(Messages)
+  //   echo(Chats) về TRƯỚC  ⇒ bản cũ gán selectedIndex = 0 ⇒ bóng nước "về lại item 1"
+  //   echo(Messages) về sau ⇒ lại sang item 2
+  //
+  // Mỗi nhịp cách nhau đúng MỘT vòng bridge — đó là cái "nhảy qua lại có delay" user báo
+  // 29/07, và nó KHÁC đường `setItems:` mà `_pendingKey` đã cắt: ở đây kẻ ghi đè là chính
+  // JS, không phải badge.
+  //
+  // Lọc bằng ĐẾM số echo đang bay, KHÔNG bằng so giá trị với pending. So giá trị hở đúng một
+  // ca tất định: chuỗi 3 tap A → B → A thì echo(A) ĐẦU TIÊN tình cờ trùng pending=A nên được
+  // nhận là "câu trả lời của cú tap mới nhất" ⇒ retire pending + huỷ watchdog ⇒ echo(B) và
+  // echo(A) còn lại đi qua trần trụi ⇒ bar nhảy sang B rồi về A, đúng triệu chứng đang sửa.
+  // Đếm thì bất kể giá trị: chỉ echo CUỐI CÙNG mới hạ số về 0 và mới được chốt.
+  //
+  // Vì sao đếm được mà tập `_emitted` thì không: re-tap cùng tab KHÔNG sinh echo (effect phía
+  // JS chỉ chạy khi `active` đổi) ⇒ số đếm dư. Với tập key thì rác đó sống VĨNH VIỄN; với số
+  // đếm thì `revertPendingKey` reset về 0 ⇒ lệch bị chặn cứng trong một cửa sổ
+  // `kPendingRevertDelay`, và trong cửa sổ đó `_pendingKey == _activeKey` nên hiển thị vẫn đúng.
+  if (_outstandingEchoes > 0) _outstandingEchoes--;
+
+  // Cố ý KHÔNG gia hạn watchdog ở đường bỏ qua: timer đang chạy thuộc cú tap MỚI NHẤT, nên để
+  // nguyên thì có bound cứng "≤ kPendingRevertDelay kể từ cú tap cuối". Gia hạn sẽ cho một
+  // chuỗi echo lạc hậu đẩy hạn đi vô hạn ⇒ bar kẹt ở pending.
+  if (_pendingKey.length > 0 &&
+      (_outstandingEchoes > 0 || ![next isEqualToString:_pendingKey])) {
+    return;
+  }
+
+  // JS đã trả lời ĐÚNG cú tap mới nhất (hoặc JS tự đổi tab khi không có cú tap nào đang
+  // chờ) ⇒ sự thật về lại tay nó hoàn toàn. Watchdog chỉ tồn tại cho trường hợp JS IM LẶNG.
+  _outstandingEchoes = 0;
+  _pendingKey = @"";
+  [self cancelPendingRevert];
   [self syncSelection];
+}
+
+/// Tab bar ĐANG hiển thị. Khác `_activeKey` khi đang chờ JS xác nhận một cú tap.
+- (NSString *)visualActiveKey
+{
+  return _pendingKey.length > 0 ? _pendingKey : _activeKey;
 }
 
 - (void)syncSelection
 {
   if (_tbc == nil || _keys.count == 0) return;
-  const NSUInteger idx = [_keys indexOfObject:_activeKey];
+  // Theo tab ĐANG VẼ, không theo `_activeKey`: `setItems:` bị gọi mỗi lần badge/avatar đổi
+  // và rất hay rơi vào đúng cửa sổ chờ echo (đổi tab làm unread đổi ⇒ cùng một commit
+  // React gửi `setTabs` TRƯỚC `setActive` — đo được ở `tabOrder` probe của mini-app). Đọc
+  // `_activeKey` ở đây là kéo bar về tab trước rồi mới sang tab mới ⇒ giật thấy rõ vì
+  // capsule Liquid Glass có animation trượt.
+  NSUInteger idx = [_keys indexOfObject:[self visualActiveKey]];
+  // Pending trỏ một key KHÔNG còn trong danh sách (consumer đổi tập tab giữa lúc chờ echo)
+  // ⇒ rơi về sự thật của JS thay vì bỏ cuộc. Không có dòng này thì bar đứng ở tab UIKit
+  // vừa tự chọn (index 0) cho tới khi watchdog nổ — mini-app hiện tại có tập tab cố định
+  // nên không tới được, nhưng thư viện phục vụ 2 host và mọi mini-app.
+  if (idx == NSNotFound) idx = [_keys indexOfObject:_activeKey];
   if (idx == NSNotFound || idx >= _tbc.viewControllers.count) return;
-  if (_tbc.selectedIndex != idx) _tbc.selectedIndex = idx;
+  if (_tbc.selectedIndex == idx) return;
+  _applyingSelection = YES;
+  _tbc.selectedIndex = idx;
+  _applyingSelection = NO;
+}
+
+/// Nhớ tab user vừa chọn (UIKit đã tự hiển thị nó) rồi hẹn giờ trả về sự thật của JS nếu
+/// JS không xác nhận.
+///
+/// PRECONDITION: chỉ gọi từ nơi UIKit ĐÃ tự chuyển selection sang `key` — hiện tại là
+/// `didSelectViewController:`. Vì thế ở đây KHÔNG gọi `syncSelection`: index đã đúng sẵn,
+/// gán lại chỉ mời thêm một lượt delegate. Thêm call site khác (long-press, accessibility
+/// action, swipe) thì call site đó PHẢI tự `syncSelection`, nếu không bar ghi nhận pending
+/// mà không đổi hình. Tiền đề này thuộc call site, không phải tính chất của hàm.
+- (void)showPendingKey:(NSString *)key
+{
+  if (key.length == 0) return;
+  _pendingKey = key;
+  [self cancelPendingRevert];
+  [self performSelector:@selector(revertPendingKey)
+             withObject:nil
+             afterDelay:kPendingRevertDelay];
+}
+
+- (void)cancelPendingRevert
+{
+  [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                           selector:@selector(revertPendingKey)
+                                             object:nil];
+}
+
+- (void)revertPendingKey
+{
+  if (_pendingKey.length == 0) return;
+  _pendingKey = @"";
+  // Reset bộ đếm ở ĐÂY là thứ chặn drift của nó: re-tap bắn `onSelect` mà JS không echo lại,
+  // nên số đếm có thể dư. Nhờ dòng này, lệch chỉ sống trong một cửa sổ `kPendingRevertDelay`
+  // chứ không tích vĩnh viễn — đó là lý do đếm SỐ an toàn hơn giữ TẬP key đã emit.
+  _outstandingEchoes = 0;
+  // Về đúng thứ JS đang giữ. JS im lặng nghĩa là nó KHÔNG nhận cú đổi tab này (mini-app
+  // chặn, hoặc chưa ai đăng ký listener) ⇒ bar không được ở lại tab mà app không mở.
+  [self syncSelection];
+}
+
+- (void)dealloc
+{
+  // `performSelector:afterDelay:` RETAIN target ⇒ không có đường gọi vào object đã chết:
+  // còn perform treo thì `dealloc` chưa chạy được. Huỷ ở đây chỉ để bar không bị neo sống
+  // thêm 600 ms sau khi chủ đã bỏ nó. Đừng đọc dòng này thành "dealloc đang bảo vệ khỏi
+  // callback chết" — ai đổi sang `NSTimer` weak-target hay `dispatch_after` + `weak self`
+  // sẽ mất chỗ dựa đó mà tưởng vẫn còn.
+  [self cancelPendingRevert];
 }
 
 - (void)tabBarController:(UITabBarController *)tabBarController
  didSelectViewController:(UIViewController *)viewController
 {
+  // Selection do TA đặt thì không phải ý user ⇒ không báo JS (xem `_applyingSelection`).
+  if (_applyingSelection) return;
   const NSUInteger idx = [tabBarController.viewControllers indexOfObject:viewController];
   if (idx == NSNotFound || idx >= _keys.count) return;
   NSString *key = _keys[idx];
-  // KHÔNG tự ghi `_activeKey`: sự thật thuộc JS. Nó sẽ gọi `setActiveKey:` về, và
-  // `syncSelection` là no-op nếu index đã đúng ⇒ không có vòng lặp.
-  if (self.onSelect != nil && key.length > 0) self.onSelect(key);
+  if (key.length == 0) return;
+  // Ghi vào `_pendingKey`, KHÔNG vào `_activeKey`: sự thật vẫn thuộc JS (nó có quyền phủ
+  // quyết bằng cách gửi key khác). Nhưng từ giây này bar ĐANG hiển thị `key`, nên mọi
+  // `syncSelection` xen vào phải tôn trọng nó thay vì kéo về quá khứ.
+  [self showPendingKey:key];
+  // Re-tap chính tab đang chọn vẫn phải báo: mini-app dùng nó để đóng panel topics
+  // (`isHomeTabReTap`). Nên KHÔNG chặn theo "key không đổi".
+  //
+  // Tăng bộ đếm NGAY TRƯỚC khi bắn, trong cùng nhánh: đếm ở chỗ khác (vd trong
+  // `showPendingKey:`) sẽ lệch pha với số echo thật khi có đường nào chỉ hiện pending mà
+  // không báo JS.
+  if (self.onSelect != nil) {
+    _outstandingEchoes++;
+    self.onSelect(key);
+  }
 }
 
 #pragma mark Appearance

@@ -50,6 +50,11 @@ class LTBBarView(context: Context) : View(context) {
 
   private var items: List<Item> = emptyList()
   private var activeKey: String = ""
+
+  /** Số `onSelect` đã bắn mà JS chưa trả lời — lọc ECHO LẠC HẬU. Giữ giống
+   *  `LTBSystemBar::_outstandingEchoes` và `LTBBarView.mm::_outstandingEchoes` (lý do dài
+   *  ở bản iOS): lệch nhánh ở đúng cơ chế này là lỗi im lặng, vì mỗi máy chỉ chạy một nhánh. */
+  private var outstandingEchoes = 0
   private var cornerRadius = dp(32f)
   private var tintActive = Color.BLACK
   private var tintInactive = Color.GRAY
@@ -100,6 +105,9 @@ class LTBBarView(context: Context) : View(context) {
   private val revertPending = Runnable {
     if (pendingKey.isNotEmpty()) {
       pendingKey = ""
+      // Reset bộ đếm ở đây là thứ chặn drift của nó (re-tap bắn `onSelect` mà JS không echo
+      // lại ⇒ đếm dư). Nhờ vậy lệch chỉ sống trong một cửa sổ PENDING_REVERT_MS.
+      outstandingEchoes = 0
       animateLens()
       invalidate()
     }
@@ -161,14 +169,27 @@ class LTBBarView(context: Context) : View(context) {
   }
 
   fun setActiveKey(key: String) {
-    // JS đã lên tiếng ⇒ sự thật về tay nó, kể cả khi giá trị không đổi; huỷ watchdog
-    // (nó chỉ tồn tại cho trường hợp JS IM LẶNG).
+    val had = activeKey.isNotEmpty()
+    val changed = key != activeKey
+    // BẤT BIẾN: ghi `activeKey` TRƯỚC guard echo lạc hậu. Ghi sau thì ca "JS phủ quyết" gãy
+    // vĩnh viễn — echo phủ quyết bị guard bỏ qua, watchdog revert về một tab CỔ, và JS không
+    // đổi `active` nữa nên không còn echo nào tới sửa.
+    activeKey = key
+
+    // ECHO LẠC HẬU — cùng bug, cùng cách chặn với bản iOS. Bản trước xoá `pendingKey` + huỷ
+    // watchdog VÔ ĐIỀU KIỆN ngay đầu hàm, nên câu trả lời của một cú tap đã bị cú tap sau
+    // thay thế vẫn kéo lens về tab người ta vừa bỏ: tap item 1 → tap item 2 → echo(1) về
+    // trước ⇒ lens "về lại item 1". Đếm theo SỐ LƯỢNG, không so giá trị: chuỗi 3 tap
+    // A → B → A thì echo(A) đầu tiên trùng pending nên so-giá-trị sẽ chốt sớm rồi để hai
+    // echo còn lại đi qua trần trụi.
+    if (outstandingEchoes > 0) outstandingEchoes--
+    if (pendingKey.isNotEmpty() && (outstandingEchoes > 0 || key != pendingKey)) return
+
     val wasPending = pendingKey.isNotEmpty()
+    outstandingEchoes = 0
     pendingKey = ""
     pendingHandler.removeCallbacks(revertPending)
-    if (key == activeKey && !wasPending) return
-    val had = activeKey.isNotEmpty()
-    activeKey = key
+    if (!changed && !wasPending) return
     // Đang kéo thì ngón là chủ, không giật lens về ô nghỉ giữa cú vuốt.
     if (dragIndex >= 0) { invalidate(); return }
     if (had) animateLens() else { snapLens(); invalidate() }
@@ -446,7 +467,9 @@ class LTBBarView(context: Context) : View(context) {
         showPendingKey(key)
         animateLens()
         invalidate()
-        onSelect?.invoke(key)
+        // Đếm NGAY TRƯỚC khi bắn — xem `outstandingEchoes`. Đếm trong `showPendingKey` sẽ
+        // lệch pha, vì kéo ngang cũng hiện pending mà KHÔNG báo JS.
+        onSelect?.let { emit -> outstandingEchoes++; emit(key) }
         return true
       }
     }
