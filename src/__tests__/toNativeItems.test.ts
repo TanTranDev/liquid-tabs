@@ -40,12 +40,19 @@ describe('encodeBadge — 3 trạng thái nhồi vào 1 string (codegen không c
     expect(encodeBadge(undefined, false, 9)).toBe('');
   });
 
-  it('sentinel dot KHÁC chuỗi rỗng và KHÁC "0"', () => {
-    // Nếu sentinel trùng '' thì native không phân biệt được "chấm" với "không
-    // badge"; nếu là '0' thì badge số 0 hợp lệ về hình thức sẽ thành chấm.
+  it('sentinel dot GHIM ĐÚNG GIÁ TRỊ " " — hợp đồng với native', () => {
+    // GHIM GIÁ TRỊ, không chỉ ghim tính chất. Đây là hợp đồng LIÊN-NGÔN-NGỮ:
+    // đầu kia là `kBadgeDotSentinel` trong ios/LTBItemView.mm. Bản trước chỉ
+    // assert `!== ''`, `!== '0'`, `length === 1` ⇒ đổi BADGE_DOT thành 'x' thì
+    // CẢ suite vẫn xanh, còn native thôi nhận ra chấm và vẽ badge text "x".
+    // Đúng dạng fixture mù: assertion thỏa được bởi cả code đúng lẫn code sai.
+    // Đổi giá trị ở đây ⇒ PHẢI đổi kBadgeDotSentinel trong .mm cùng lúc.
+    expect(BADGE_DOT).toBe(' ');
+    // Giữ luôn 2 tính chất cũ vì chúng nói LÝ DO chọn khoảng trắng: trùng ''
+    // thì native không phân biệt "chấm" với "không badge"; là '0' thì badge số 0
+    // hợp lệ về hình thức sẽ bị đọc thành chấm.
     expect(BADGE_DOT).not.toBe('');
     expect(BADGE_DOT).not.toBe('0');
-    expect(BADGE_DOT.length).toBe(1);
   });
 });
 
@@ -77,6 +84,17 @@ describe('toNativeItems — mọi field xuống native là string, không undefi
   it('sfSymbolSelected vắng → dùng lại sfSymbol (luật fallback ở MỘT chỗ)', () => {
     const [item] = toNativeItems([{ key: 'Chats', sfSymbol: 'house' }]);
     expect(item?.sfSymbolSelected).toBe('house');
+  });
+
+  it('sfSymbolSelected là chuỗi RỖNG → vẫn fallback về sfSymbol', () => {
+    // Đây là ca app THẬT đi qua: mini-app gửi '' cho AI Hub vì `sparkles` không
+    // có biến thể .fill. Bản trước dùng `??` nên '' đi thẳng xuống native, và
+    // test "5 tab thật" lại BỎ TRỐNG field thay vì gửi '' ⇒ mutant bỏ fallback
+    // chỉ bị bắt ở đường mà app không bao giờ đi.
+    const [item] = toNativeItems([
+      { key: 'AIHub', sfSymbol: 'sparkles', sfSymbolSelected: '' },
+    ]);
+    expect(item?.sfSymbolSelected).toBe('sparkles');
   });
 
   it('sfSymbolSelected có → giữ nguyên, không bị sfSymbol ghi đè', () => {
@@ -113,7 +131,8 @@ describe('toNativeItems — mọi field xuống native là string, không undefi
     const out = toNativeItems([
       { key: 'Chats', label: 'Home', sfSymbol: 'house', sfSymbolSelected: 'house.fill' },
       { key: 'Messages', label: 'Chats', sfSymbol: 'message', sfSymbolSelected: 'message.fill' },
-      { key: 'AIHub', label: 'AI Hub', sfSymbol: 'sparkles' },
+      // Gửi '' ĐÚNG NHƯ mini-app gửi (không bỏ trống) — xem ca riêng ở trên.
+      { key: 'AIHub', label: 'AI Hub', sfSymbol: 'sparkles', sfSymbolSelected: '' },
       { key: 'Activity', label: 'Activity', sfSymbol: 'bell', sfSymbolSelected: 'bell.fill', badge: 12 },
       { key: 'You', imageUrl: 'https://lh3.googleusercontent.com/a=s256', dot: true },
     ]);

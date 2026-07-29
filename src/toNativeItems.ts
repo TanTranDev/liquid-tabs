@@ -38,9 +38,13 @@ export const toNativeItems = (
     key: it.key,
     label: it.label ?? '',
     sfSymbol: it.sfSymbol ?? '',
-    // Rỗng ⇒ native dùng lại `sfSymbol`; điền sẵn ở đây để native khỏi phải
-    // biết luật fallback (một luật, một chỗ).
-    sfSymbolSelected: it.sfSymbolSelected ?? it.sfSymbol ?? '',
+    // Fallback selected → thường: dùng `||` chứ KHÔNG `??`. Phía gọi có thể gửi
+    // chuỗi RỖNG một cách chủ đích ("symbol này không có biến thể .fill" — vd
+    // `sparkles`), mà `??` chỉ bắt null/undefined nên `''` sẽ đi thẳng xuống
+    // native. Trước đây icon vẫn đúng, nhưng chỉ nhờ native TỰ fallback lần thứ
+    // hai — tức luật nằm ở HAI chỗ trong khi comment này nói là một. Nay chuẩn
+    // hoá tại đây để native chỉ còn là lưới cuối, không phải nguồn luật.
+    sfSymbolSelected: it.sfSymbolSelected || it.sfSymbol || '',
     imageUrl: it.imageUrl ?? '',
     badge: encodeBadge(it.badge, it.dot, badgeCap),
   }));

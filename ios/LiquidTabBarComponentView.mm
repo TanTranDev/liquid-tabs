@@ -138,7 +138,14 @@ static const CGFloat kLensSpringDamping = 0.86;
   const BOOL clearStyle = newProps.glassStyle == "clear";
   [self buildGlassIfNeededWithSpacing:(CGFloat)newProps.mergeSpacing clearStyle:clearStyle];
 
-  _cornerRadius = (CGFloat)newProps.cornerRadius;
+  // cornerRadius chỉ được GÁN vào layer trong layoutSubviews, mà prop đổi một
+  // mình không sinh layout pass ⇒ phải tự yêu cầu. Thiếu dòng này thì prop công
+  // khai `cornerRadius` âm thầm không có tác dụng cho tới lần relayout kế tiếp.
+  const CGFloat newRadius = (CGFloat)newProps.cornerRadius;
+  if (newRadius != _cornerRadius) {
+    _cornerRadius = newRadius;
+    [self setNeedsLayout];
+  }
 
   UIColor *tint = RCTUIColorFromSharedColor(newProps.tintColor) ?: UIColor.labelColor;
   UIColor *inactive = RCTUIColorFromSharedColor(newProps.inactiveTintColor) ?: UIColor.secondaryLabelColor;

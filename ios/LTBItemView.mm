@@ -119,6 +119,13 @@ static NSCache<NSString *, UIImage *> *LTBImageCache(void)
 
 - (void)loadRemoteImage:(NSString *)urlString
 {
+  // De-dup lượt ĐANG BAY. `configureWith…` được gọi lại mỗi lần props xuống, và
+  // props xuống mỗi lần phía JS render (unread count đổi, store đổi…) vì `items`
+  // là literal mới mỗi render. Không có chốt này thì cold start mạng chậm bắn
+  // vài GET trùng nhau cho cùng một URL cho tới khi cache lấp.
+  if ([urlString isEqualToString:_pendingImageURL] && _iconView.image != nil) {
+    return;
+  }
   _pendingImageURL = urlString;
 
   UIImage *cached = [LTBImageCache() objectForKey:urlString];
