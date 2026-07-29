@@ -31,13 +31,30 @@ export type HostGeometry = {
 type Spec = typeof import('./specs/NativeLiquidTabs').default;
 
 /**
- * Nạp TurboModule một lần. Vắng (host chưa build native / non-iOS) → null.
- * `getEnforcing` THROW nên phải bọc — và đây là đường THẬT ở mọi máy chưa rebuild.
+ * Nền tảng có bản native của thư viện này.
+ *
+ * ⚠️ Android PHẢI ở đây. Nó không có kính (`isGlassAvailable()` trả false từ
+ * Kotlin) nhưng CÓ bar nền vẽ tay — đúng thứ để phía gọi không phải tự vẽ. Bản
+ * v0.2.0 viết gate là `Platform.OS !== 'ios'` nên Android không bao giờ nạp
+ * TurboModule ⇒ `isAvailable()` false ⇒ toàn bộ bar Kotlin thành code chết, và
+ * chết IM LẶNG: không exception, không warn, chỉ là "Android không có bar".
+ * Gốc của lỗi là gộp hai câu hỏi khác nhau — "có kính không" với "có bar không".
+ *
+ * Nền tảng ngoài danh sách (web/windows/macos) không có native ⇒ chặn TRƯỚC
+ * `require` để khỏi tốn một lần `getEnforcing` chắc chắn throw.
+ */
+export const isSupportedPlatform = (os: string): boolean =>
+  os === 'ios' || os === 'android';
+
+/**
+ * Nạp TurboModule một lần. Vắng (host chưa build native / nền tảng không hỗ trợ)
+ * → null. `getEnforcing` THROW nên phải bọc — và đây là đường THẬT ở mọi máy chưa
+ * rebuild.
  */
 let cached: Spec | null | undefined;
 const mod = (): Spec | null => {
   if (cached !== undefined) return cached;
-  if (Platform.OS !== 'ios') {
+  if (!isSupportedPlatform(Platform.OS)) {
     cached = null;
     return cached;
   }

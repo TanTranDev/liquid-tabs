@@ -11,9 +11,15 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
 import android.util.LruCache
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.View
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import com.caverock.androidsvg.SVG
 import java.net.URL
 import java.util.concurrent.Executors
@@ -73,7 +79,30 @@ class LTBBarView(context: Context) : View(context) {
   private val barRect = RectF()
   private val lensRect = RectF()
   private var lensAnim: ValueAnimator? = null
-  private var lensX = 0f
+
+  /** TÂM của lens theo trục X; -1 = không có tab nào để vẽ. Dùng tâm (không phải mép
+   *  trái như bản trước) vì lúc vuốt lens dính theo ngón và giãn hai phía — mép trái
+   *  không còn là đại lượng tự nhiên. */
+  private var lensCenterX = -1f
+
+  // ── Vuốt-để-chọn (yêu cầu USER 29/07). Cùng luật với iOS: lens theo ngón liên
+  //    tục, tab chỉ đổi khi NHẢ tay. "Bóng nước" ở Android là do TA vẽ (giãn ngang
+  //    theo tốc độ + bẹp dọc bù lại) — nền tảng này không có vật liệu kính.
+  /** Tab đang VẼ nhưng JS chưa xác nhận. Rỗng = không có. Chống nháy một nhịp bridge. */
+  private var pendingKey: String = ""
+  /** Index dưới ngón khi đang kéo; -1 = không kéo. */
+  private var dragIndex = -1
+  private var downX = 0f
+  private var lensStretch = 0f
+  private var velocityTracker: VelocityTracker? = null
+  private val pendingHandler = Handler(Looper.getMainLooper())
+  private val revertPending = Runnable {
+    if (pendingKey.isNotEmpty()) {
+      pendingKey = ""
+      animateLens()
+      invalidate()
+    }
+  }
 
   /** Bitmap icon đã render, khoá theo (svg, kích thước). Parse SVG là việc đắt —
    *  không làm lại mỗi lần vẽ. LruCache tự nhả khi thiếu bộ nhớ. */
@@ -118,10 +147,40 @@ class LTBBarView(context: Context) : View(context) {
   }
 
   fun setActiveKey(key: String) {
-    if (key == activeKey) return
+    // JS đã lên tiếng ⇒ sự thật về tay nó, kể cả khi giá trị không đổi; huỷ watchdog
+    // (nó chỉ tồn tại cho trường hợp JS IM LẶNG).
+    val wasPending = pendingKey.isNotEmpty()
+    pendingKey = ""
+    pendingHandler.removeCallbacks(revertPending)
+    if (key == activeKey && !wasPending) return
     val had = activeKey.isNotEmpty()
     activeKey = key
+    // Đang kéo thì ngón là chủ, không giật lens về ô nghỉ giữa cú vuốt.
+    if (dragIndex >= 0) { invalidate(); return }
     if (had) animateLens() else { snapLens(); invalidate() }
+  }
+
+  /** Tab đang VẼ. Khác [activeKey] khi đang chờ JS xác nhận. */
+  private fun visualActiveKey(): String = pendingKey.ifEmpty { activeKey }
+
+  /** Hiện [key] ngay (lạc quan) rồi hẹn giờ trả về sự thật nếu JS không xác nhận.
+   *  Bar sống NGOÀI cây React nên không ai tự sửa nó — thiếu lưới này thì một lần
+   *  app từ chối đổi tab là bar kẹt sai vĩnh viễn. */
+  private fun showPendingKey(key: String) {
+    if (key.isEmpty()) return
+    pendingKey = key
+    pendingHandler.removeCallbacks(revertPending)
+    pendingHandler.postDelayed(revertPending, PENDING_REVERT_MS)
+  }
+
+  override fun onDetachedFromWindow() {
+    super.onDetachedFromWindow()
+    // Handler giữ tham chiếu tới view — không dọn là callback vẫn chạy sau khi bar
+    // đã rời window.
+    pendingHandler.removeCallbacks(revertPending)
+    lensAnim?.cancel()
+    velocityTracker?.recycle()
+    velocityTracker = null
   }
 
   fun setTint(active: Int, inactive: Int) {
@@ -149,21 +208,35 @@ class LTBBarView(context: Context) : View(context) {
   private fun itemWidth(): Float =
     if (items.isEmpty()) 0f else width.toFloat() / items.size
 
-  private fun activeIndex(): Int = items.indexOfFirst { it.key == activeKey }
+  /** Theo tab đang VẼ, không theo [activeKey]: lúc chờ JS xác nhận, lens phải nằm ở
+   *  ô người dùng vừa chọn, nếu không nó giật về ô cũ rồi mới sang. */
+  private fun activeIndex(): Int = items.indexOfFirst { it.key == visualActiveKey() }
+
+  /** Tâm ô nghỉ của item thứ [i]. */
+  private fun restCenterX(i: Int): Float = itemWidth() * (i + 0.5f)
 
   private fun snapLens() {
     val i = activeIndex()
-    lensX = if (i < 0) -1f else itemWidth() * i
+    lensCenterX = if (i < 0) -1f else restCenterX(i)
+    lensStretch = 0f
   }
 
   private fun animateLens() {
     val i = activeIndex()
-    if (i < 0) { lensX = -1f; invalidate(); return }
-    val target = itemWidth() * i
+    if (i < 0) { lensCenterX = -1f; invalidate(); return }
+    val target = restCenterX(i)
+    val from = if (lensCenterX < 0f) target else lensCenterX
+    val fromStretch = lensStretch
     lensAnim?.cancel()
-    lensAnim = ValueAnimator.ofFloat(if (lensX < 0f) target else lensX, target).apply {
-      duration = 320
-      addUpdateListener { lensX = it.animatedValue as Float; invalidate() }
+    lensAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+      duration = LENS_ANIM_MS
+      addUpdateListener {
+        val t = it.animatedValue as Float
+        lensCenterX = from + (target - from) * t
+        // Giãn co về 0 cùng lúc ⇒ khối nước "đàn" lại thay vì nhảy về hình nghỉ.
+        lensStretch = fromStretch * (1f - t)
+        invalidate()
+      }
       start()
     }
   }
@@ -181,13 +254,26 @@ class LTBBarView(context: Context) : View(context) {
     if (items.isEmpty()) return
     val iw = itemWidth()
 
-    if (lensX >= 0f) {
-      lensRect.set(lensX + dp(4f), dp(6f), lensX + iw - dp(4f), height - dp(6f))
-      canvas.drawRoundRect(lensRect, dp(18f), dp(18f), lensPaint)
+    if (lensCenterX >= 0f) {
+      val restW = iw - dp(4f) * 2f
+      val restH = height - dp(6f) * 2f
+      val w = restW + lensStretch
+      val h = max(1f, restH - lensStretch * LENS_SQUASH_RATIO)
+      // Kẹp tâm để lens không tràn khỏi nền bar.
+      val minCX = dp(4f) + w / 2f
+      val maxCX = width - dp(4f) - w / 2f
+      val cx = if (minCX > maxCX) width / 2f else max(minCX, min(maxCX, lensCenterX))
+      val cy = height / 2f
+      lensRect.set(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+      // Capsule: bán kính = nửa chiều cao HIỆN TẠI (bản trước cố định 18dp nên lúc
+      // bẹp sẽ ra hình viên thuốc méo).
+      val r = h / 2f
+      canvas.drawRoundRect(lensRect, r, r, lensPaint)
     }
 
+    val visual = visualActiveKey()
     items.forEachIndexed { index, item ->
-      drawItem(canvas, item, iw * index, iw, item.key == activeKey)
+      drawItem(canvas, item, iw * index, iw, item.key == visual)
     }
   }
 
@@ -306,16 +392,83 @@ class LTBBarView(context: Context) : View(context) {
 
   // ── Touch
 
+  /** Index của item tại toạ độ x, kẹp vào [0, n-1] để kéo ra ngoài mép không mất bám. */
+  private fun indexAtX(x: Float): Int {
+    if (items.isEmpty()) return -1
+    val iw = itemWidth()
+    if (iw <= 0f) return -1
+    return (x / iw).toInt().coerceIn(0, items.size - 1)
+  }
+
   override fun onTouchEvent(event: MotionEvent): Boolean {
-    if (event.action == MotionEvent.ACTION_UP && items.isNotEmpty()) {
-      val iw = itemWidth()
-      val index = (event.x / iw).toInt().coerceIn(0, items.size - 1)
-      onSelect?.invoke(items[index].key)
-      return true
+    if (items.isEmpty()) return super.onTouchEvent(event)
+
+    when (event.actionMasked) {
+      MotionEvent.ACTION_DOWN -> {
+        downX = event.x
+        dragIndex = -1
+        velocityTracker?.recycle()
+        velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
+        // PHẢI trả true ở DOWN, nếu không Android không gửi MOVE/UP tiếp — đó là lý
+        // do bản trước (chỉ bắt ACTION_UP) không thể vuốt được.
+        return true
+      }
+
+      MotionEvent.ACTION_MOVE -> {
+        velocityTracker?.addMovement(event)
+        // Ngưỡng slop chỉ tính trục X: vuốt DỌC (vd kéo lên đóng app) không được
+        // biến thành đổi tab.
+        if (dragIndex < 0 && abs(event.x - downX) < dp(DRAG_SLOP_DP)) return true
+        val idx = indexAtX(event.x)
+        if (idx < 0) return true
+        dragIndex = idx
+        val key = items[idx].key
+        // Highlight theo ngón NGAY, nhưng KHÔNG báo JS (USER chốt: đổi màn khi nhả).
+        if (key != visualActiveKey()) pendingKey = key
+        lensAnim?.cancel()
+        val vx = velocityTracker?.let {
+          it.computeCurrentVelocity(1000)
+          it.xVelocity
+        } ?: 0f
+        lensCenterX = event.x
+        lensStretch = min(dp(LENS_STRETCH_MAX_DP), abs(vx) * dp(LENS_STRETCH_MAX_DP) / STRETCH_VEL_FULL)
+        invalidate()
+        return true
+      }
+
+      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+        velocityTracker?.recycle()
+        velocityTracker = null
+        val dragged = dragIndex >= 0
+        val idx = if (dragged) dragIndex else indexAtX(event.x)
+        dragIndex = -1
+        if (idx < 0) return true
+        val key = items[idx].key
+        // Huỷ cũng CHỐT theo ô cuối dưới ngón: người dùng đã thấy highlight ở đó, trả
+        // về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
+        showPendingKey(key)
+        animateLens()
+        invalidate()
+        onSelect?.invoke(key)
+        return true
+      }
     }
     return super.onTouchEvent(event)
   }
 
   private fun dp(v: Float) = v * resources.displayMetrics.density
   private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
+
+  private companion object {
+    const val LENS_ANIM_MS = 320L
+    /** Giãn ngang tối đa (dp) khi ngón đi nhanh. */
+    const val LENS_STRETCH_MAX_DP = 26f
+    /** Tốc độ (px/s) tại đó giãn chạm trần. */
+    const val STRETCH_VEL_FULL = 1200f
+    /** Giãn ngang thì bẹp dọc — giữ cảm giác bảo toàn thể tích. */
+    const val LENS_SQUASH_RATIO = 0.18f
+    const val DRAG_SLOP_DP = 6f
+    /** JS không xác nhận trong khoảng này ⇒ trả highlight về sự thật. */
+    const val PENDING_REVERT_MS = 600L
+  }
 }

@@ -3,9 +3,29 @@
 
 static const CGFloat kLensInsetX = 4.0;
 static const CGFloat kLensInsetY = 6.0;
-static const CGFloat kLensCornerRadius = 18.0;
 static const NSTimeInterval kLensAnimDuration = 0.32;
 static const CGFloat kLensSpringDamping = 0.86;
+
+// ── Vuốt-để-chọn (yêu cầu USER 29/07). Lens đi theo ngón LIÊN TỤC; tab chỉ đổi
+// khi NHẢ tay (USER chốt: tránh mount/unmount 4 screen liên tiếp khi kéo một lượt).
+//
+// Phần "bóng nước" ở đây là do TA tự vẽ, KHÔNG dựa vào merge của UIKit: lens giãn
+// theo trục X tỉ lệ với tốc độ ngón rồi đàn về. Lý do không dựa vào merge: lens nằm
+// TRỌN trong platter nên khoảng cách giữa hai khối kính là 0, mà `spacing` của
+// UIGlassContainerEffect là "khoảng cách mà các phần tử BẮT ĐẦU hợp nhất" — rất có
+// thể UIKit đang hợp nhất lens vào platter, tức lens tan vào nền. Chưa phân định
+// được trên máy; `setMergeSpacing` là núm xoay để thử (0 = không hợp nhất).
+static const CGFloat kLensStretchMax = 26.0;
+/// Đổi tốc độ ngón (pt/s) thành lượng giãn. 1200 pt/s ⇒ chạm trần.
+static const CGFloat kLensStretchPerVelocity = kLensStretchMax / 1200.0;
+/// Giãn ngang thì bẹp dọc — giữ cảm giác BẢO TOÀN THỂ TÍCH của khối nước.
+static const CGFloat kLensSquashRatio = 0.18;
+/// Ngưỡng coi là "kéo" thay vì "chạm", để tap không bị hiểu thành vuốt 1px.
+static const CGFloat kDragSlop = 6.0;
+/// Nếu phía JS không xác nhận lựa chọn trong khoảng này, trả highlight về sự thật.
+/// Bar sống NGOÀI cây React nên không có ai tự sửa nó — thiếu lưới này thì một lần
+/// app từ chối đổi tab là bar kẹt sai vĩnh viễn.
+static const NSTimeInterval kPendingRevertDelay = 0.6;
 
 // Nền VẼ TAY khi không có UIGlassEffect. Giá trị lấy nguyên từ `GlassSurface` của
 // mini-app (đã device-verify 18/07, căn theo platter App Store iOS 26): tint đục
@@ -59,6 +79,15 @@ static UIColor *LTBFallbackLensFill(void)
   CGFloat _cornerRadius;
   CGFloat _mergeSpacing;
   BOOL _useGlass;
+
+  // ── Vuốt-để-chọn
+  UIPanGestureRecognizer *_pan;
+  /// Tab mà bar đang hiển thị nhưng JS CHƯA xác nhận (lạc quan). Rỗng = không có.
+  /// Tồn tại để bỏ nháy: chờ một vòng bridge mới đổi highlight thì lens giật về ô
+  /// cũ rồi mới sang ô mới — thấy rõ bằng mắt.
+  NSString *_pendingKey;
+  /// Index dưới ngón trong lúc kéo; -1 = không kéo.
+  NSInteger _dragIndex;
 }
 
 + (BOOL)isGlassAvailable
@@ -97,6 +126,17 @@ static UIColor *LTBFallbackLensFill(void)
     self.clipsToBounds = YES;
 
     _itemsHost = [UIView new];
+    _pendingKey = @"";
+    _dragIndex = -1;
+
+    // Pan trên CHÍNH bar, không trên từng item: kéo là hành vi của cả thanh. Sống
+    // chung được với tap của LTBItemView (UIControl) vì pan chỉ nhận diện sau khi
+    // ngón đi quá ngưỡng — lúc đó UIKit tự huỷ tracking của UIControl, đúng khuôn
+    // button-trong-scrollview. Nhờ vậy KHÔNG phải tắt userInteractionEnabled của
+    // item, tức không mất tap + accessibility của UIControl.
+    _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
+    _pan.cancelsTouchesInView = NO;
+    [self addGestureRecognizer:_pan];
 
     if (_useGlass) {
       [self buildGlass];
@@ -131,8 +171,12 @@ static UIColor *LTBFallbackLensFill(void)
     lensEffect.interactive = YES;
     _glassLens = [[UIVisualEffectView alloc] initWithEffect:lensEffect];
     _glassLens.layer.cornerCurve = kCACornerCurveContinuous;
-    _glassLens.layer.cornerRadius = kLensCornerRadius;
-    _glassLens.clipsToBounds = YES;
+    // Bo góc = NỬA CHIỀU CAO (đặt trong layoutSubviews) ⇒ capsule. Trước đây cố định
+    // 18 nên dù có hiệu ứng vẫn đọc thành "ô vuông bo", không ra hình giọt nước.
+    // KHÔNG clip: phần phình của hiệu ứng merge nằm NGOÀI bounds của lens, cắt là
+    // mất sạch. `self.clipsToBounds` vẫn giữ YES — đó là lưới chống bug 02/07
+    // (kính phủ toàn màn hình), và nó chặn ở mép bar chứ không chặn ở mép lens.
+    _glassLens.clipsToBounds = NO;
     _glassLens.hidden = YES;
     [_container.contentView addSubview:_glassLens];
   }
@@ -151,7 +195,9 @@ static UIColor *LTBFallbackLensFill(void)
   _fallbackLens = [UIView new];
   _fallbackLens.backgroundColor = LTBFallbackLensFill();
   _fallbackLens.layer.cornerCurve = kCACornerCurveContinuous;
-  _fallbackLens.layer.cornerRadius = kLensCornerRadius;
+  // Radius do `applyCapsuleRadiusTo:` đặt theo chiều cao thật (capsule), giống nhánh
+  // kính — hằng cố định 18 đã bỏ. Nhánh này cũng vuốt được: mọi logic vuốt nằm ở
+  // LTBBarView, `activeLens` chỉ chọn xem đang lái khối nào.
   _fallbackLens.hidden = YES;
   [_fallbackBg addSubview:_fallbackLens];
 }
@@ -182,10 +228,56 @@ static UIColor *LTBFallbackLensFill(void)
   NSString *next = key ?: @"";
   const BOOL had = _activeKey.length > 0;
   const BOOL changed = ![next isEqualToString:_activeKey];
+  // JS đã lên tiếng ⇒ sự thật về lại tay nó, dù giá trị có đổi hay không. Huỷ luôn
+  // watchdog: nó chỉ tồn tại cho trường hợp JS IM LẶNG.
+  const BOOL wasPending = _pendingKey.length > 0;
+  _pendingKey = @"";
+  [self cancelPendingRevert];
   _activeKey = next;
-  if (!changed) return;
+  if (!changed && !wasPending) return;
   [self reconfigureItems];
-  [self layoutLensAnimated:had];
+  // Đang kéo thì KHÔNG giật lens về: ngón vẫn đang giữ nó. `setActive` có thể tới
+  // giữa lúc kéo (JS đổi tab vì lý do khác) — lúc đó vị trí ngón mới là sự thật thị giác.
+  if (_dragIndex < 0) [self layoutLensAnimated:had];
+}
+
+/// Tab mà bar ĐANG VẼ. Khác `_activeKey` khi đang chờ JS xác nhận (tap/nhả vuốt).
+- (NSString *)visualActiveKey
+{
+  return _pendingKey.length > 0 ? _pendingKey : _activeKey;
+}
+
+/// Hiện `key` ngay (lạc quan) rồi hẹn giờ trả về sự thật nếu JS không xác nhận.
+- (void)showPendingKey:(NSString *)key
+{
+  if (key.length == 0) return;
+  _pendingKey = key;
+  [self reconfigureItems];
+  [self cancelPendingRevert];
+  [self performSelector:@selector(revertPendingKey)
+             withObject:nil
+             afterDelay:kPendingRevertDelay];
+}
+
+- (void)cancelPendingRevert
+{
+  [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                          selector:@selector(revertPendingKey)
+                                            object:nil];
+}
+
+- (void)revertPendingKey
+{
+  if (_pendingKey.length == 0) return;
+  _pendingKey = @"";
+  [self reconfigureItems];
+  if (_dragIndex < 0) [self layoutLensAnimated:YES];
+}
+
+- (void)dealloc
+{
+  // `performSelector:afterDelay:` giữ target — không huỷ là view chết vẫn bị gọi.
+  [self cancelPendingRevert];
 }
 
 - (void)setTintActive:(UIColor *)active inactive:(UIColor *)inactive
@@ -234,6 +326,7 @@ static UIColor *LTBFallbackLensFill(void)
 
 - (void)reconfigureItems
 {
+  NSString *visual = [self visualActiveKey];
   NSUInteger i = 0;
   for (NSDictionary<NSString *, NSString *> *p in _itemProps) {
     if (i >= _items.count) break;
@@ -245,7 +338,7 @@ static UIColor *LTBFallbackLensFill(void)
          sfSymbolSelected:p[@"sfSymbolSelected"] ?: @""
                  imageURL:p[@"imageUrl"] ?: @""
                     badge:p[@"badge"] ?: @""
-                 selected:[key isEqualToString:_activeKey]
+                 selected:[key isEqualToString:visual]
                 tintColor:_tintActive
         inactiveTintColor:_tintInactive];
   }
@@ -253,8 +346,66 @@ static UIColor *LTBFallbackLensFill(void)
 
 - (void)onItemTapped:(LTBItemView *)sender
 {
-  if (self.onSelect != nil && sender.itemKey != nil) {
-    self.onSelect(sender.itemKey);
+  if (sender.itemKey == nil) return;
+  // Hiện ngay rồi mới báo JS: chờ vòng bridge thì lens trễ một nhịp so với ngón.
+  [self showPendingKey:sender.itemKey];
+  [self layoutLensAnimated:YES];
+  if (self.onSelect != nil) self.onSelect(sender.itemKey);
+}
+
+#pragma mark - Vuốt để chọn
+
+/// Index của item tại toạ độ x. Kẹp vào [0, n-1] để kéo ra ngoài mép không mất bám.
+- (NSInteger)indexAtX:(CGFloat)x
+{
+  const NSUInteger n = _items.count;
+  if (n == 0 || self.bounds.size.width <= 0) return -1;
+  const CGFloat itemW = self.bounds.size.width / (CGFloat)n;
+  const NSInteger raw = (NSInteger)floor(x / itemW);
+  return MAX(0, MIN((NSInteger)n - 1, raw));
+}
+
+- (void)onPan:(UIPanGestureRecognizer *)g
+{
+  const NSUInteger n = _items.count;
+  if (n == 0) return;
+  const CGFloat x = [g locationInView:self].x;
+  const NSInteger idx = [self indexAtX:x];
+  if (idx < 0) return;
+
+  switch (g.state) {
+    case UIGestureRecognizerStateBegan:
+    case UIGestureRecognizerStateChanged: {
+      // Ngưỡng slop: pan của UIKit đã có ngưỡng riêng, nhưng nó tính theo mọi
+      // hướng. Ở đây chỉ quan tâm trục X — kéo dọc (vd vuốt lên để đóng app) không
+      // được kéo lens đi ngang.
+      if (_dragIndex < 0 && fabs([g translationInView:self].x) < kDragSlop) return;
+      _dragIndex = idx;
+      NSString *key = _items[(NSUInteger)idx].itemKey ?: @"";
+      // Highlight đi theo ngón NGAY, nhưng KHÔNG báo JS (USER chốt: đổi màn khi nhả).
+      // Dùng pending thay vì _activeKey để không tự ý ghi sự thật.
+      if (![key isEqualToString:[self visualActiveKey]]) {
+        _pendingKey = key;
+        [self reconfigureItems];
+      }
+      [self layoutLensFollowingX:x velocityX:[g velocityInView:self].x];
+      break;
+    }
+    case UIGestureRecognizerStateEnded:
+    case UIGestureRecognizerStateCancelled:
+    case UIGestureRecognizerStateFailed: {
+      if (_dragIndex < 0) return;  // chưa vượt slop ⇒ đây là tap, để UIControl lo
+      NSString *key = _items[(NSUInteger)_dragIndex].itemKey ?: @"";
+      _dragIndex = -1;
+      // Huỷ/thất bại cũng CHỐT theo ô cuối dưới ngón: người dùng đã thấy highlight ở
+      // đó, trả về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
+      [self showPendingKey:key];
+      [self layoutLensAnimated:YES];
+      if (self.onSelect != nil && key.length > 0) self.onSelect(key);
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -286,21 +437,61 @@ static UIColor *LTBFallbackLensFill(void)
   return _useGlass ? _glassLens : _fallbackLens;
 }
 
+/// Hình nghỉ của lens tại một item.
+- (CGRect)lensRestRectForIndex:(NSInteger)idx
+{
+  return CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
+}
+
+/// Capsule: bo góc luôn bằng nửa chiều cao HIỆN TẠI. Phải gán mỗi lần đổi frame vì
+/// lúc kéo lens bị bẹp dọc — giữ radius cũ sẽ ra hình viên thuốc méo.
+- (void)applyCapsuleRadiusTo:(UIView *)lens
+{
+  lens.layer.cornerRadius = lens.bounds.size.height / 2.0;
+}
+
+/// Lens ĐI THEO NGÓN. Không animate: mỗi frame một vị trí, đó chính là cảm giác
+/// "dính ngón". Phần "nước" nằm ở giãn ngang theo tốc độ + bẹp dọc bù lại.
+- (void)layoutLensFollowingX:(CGFloat)x velocityX:(CGFloat)vx
+{
+  UIView *lens = [self activeLens];
+  if (lens == nil || _dragIndex < 0) return;
+
+  const CGRect rest = [self lensRestRectForIndex:_dragIndex];
+  const CGFloat stretch = MIN(kLensStretchMax, fabs(vx) * kLensStretchPerVelocity);
+  const CGFloat squash = stretch * kLensSquashRatio;
+  const CGFloat w = rest.size.width + stretch;
+  const CGFloat h = MAX(1.0, rest.size.height - squash);
+
+  // Tâm dính ngón, nhưng kẹp để lens không tràn khỏi platter.
+  const CGFloat minCX = kLensInsetX + w / 2.0;
+  const CGFloat maxCX = self.bounds.size.width - kLensInsetX - w / 2.0;
+  const CGFloat cx = MAX(minCX, MIN(maxCX, x));
+
+  lens.hidden = NO;
+  lens.frame = CGRectMake(cx - w / 2.0, rest.origin.y + squash / 2.0, w, h);
+  [self applyCapsuleRadiusTo:lens];
+}
+
 - (void)layoutLensAnimated:(BOOL)animated
 {
   UIView *lens = [self activeLens];
   if (lens == nil) return;
+  // Đang kéo thì ngón là chủ — mọi nguồn khác (setItems, layoutSubviews, setActive)
+  // không được giành quyền đặt frame, nếu không lens sẽ giật về ô nghỉ giữa cú vuốt.
+  if (_dragIndex >= 0) return;
 
   const NSInteger idx = [self activeIndex];
   if (idx < 0 || _items.count == 0 || CGRectIsEmpty(self.bounds)) {
     lens.hidden = YES;
     return;
   }
-  const CGRect target = CGRectInset(_items[(NSUInteger)idx].frame, kLensInsetX, kLensInsetY);
+  const CGRect target = [self lensRestRectForIndex:idx];
   lens.hidden = NO;
 
   if (!animated) {
     lens.frame = target;
+    [self applyCapsuleRadiusTo:lens];
     return;
   }
   [UIView animateWithDuration:kLensAnimDuration
@@ -311,14 +502,20 @@ static UIColor *LTBFallbackLensFill(void)
                               UIViewAnimationOptionBeginFromCurrentState
                    animations:^{
                      lens.frame = target;
+                     // Trong khối animation ⇒ cornerRadius nội suy cùng frame; gán
+                     // ngoài khối thì hình bẹp của lúc kéo nhảy về capsule tức thì.
+                     [self applyCapsuleRadiusTo:lens];
                    }
                    completion:nil];
 }
 
+/// Theo tab ĐANG VẼ, không theo `_activeKey`: lúc chờ JS xác nhận thì lens phải nằm
+/// ở ô người dùng vừa chọn, nếu không nó giật về ô cũ rồi mới sang — thấy rõ.
 - (NSInteger)activeIndex
 {
+  NSString *visual = [self visualActiveKey];
   for (NSUInteger i = 0; i < _items.count; i++) {
-    if ([_items[i].itemKey isEqualToString:_activeKey]) return (NSInteger)i;
+    if ([_items[i].itemKey isEqualToString:visual]) return (NSInteger)i;
   }
   return -1;
 }
