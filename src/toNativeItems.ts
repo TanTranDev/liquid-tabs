@@ -12,7 +12,7 @@
 // Sentinel là khoảng trắng chứ không phải '0'/'dot' vì '0' là badge số hợp lệ về
 // hình thức và 'dot' có thể là text badge người ta muốn hiện thật.
 import type { TabItem } from './types';
-import type { NativeTabItem } from './specs/LiquidTabBarNativeComponent';
+import type { TabItemNative } from './specs/NativeLiquidTabs';
 
 export const BADGE_DOT = ' ';
 export const DEFAULT_BADGE_CAP = 9;
@@ -30,10 +30,32 @@ export const encodeBadge = (
   return dot === true ? BADGE_DOT : '';
 };
 
+/**
+ * Icon Android → JSON string cho bridge (xem lý do chọn string ở spec).
+ * Vắng / thiếu path ⇒ chuỗi RỖNG, không phải `"{}"`: native chỉ cần một phép kiểm
+ * `length == 0` thay vì phải parse rồi mới biết là trống.
+ */
+export const encodeAndroidIcon = (icon: TabItem['androidIcon']): string => {
+  if (icon == null) return '';
+  const paths = icon.paths.filter((p) => typeof p === 'string' && p.trim() !== '');
+  if (paths.length === 0) return '';
+  const selected = (icon.pathsSelected ?? []).filter(
+    (p) => typeof p === 'string' && p.trim() !== '',
+  );
+  return JSON.stringify({
+    viewBox: icon.viewBox,
+    paths,
+    // Chỉ ghi khi KHÁC `paths` — payload đi qua bridge mỗi lần setTabs, và luật
+    // "vắng ⇒ dùng lại paths" đã nằm ở native nên ghi trùng là tốn không lý do.
+    ...(selected.length > 0 ? { pathsSelected: selected } : {}),
+    ...(icon.translate != null ? { translate: icon.translate } : {}),
+  });
+};
+
 export const toNativeItems = (
   items: ReadonlyArray<TabItem>,
   badgeCap: number = DEFAULT_BADGE_CAP,
-): ReadonlyArray<NativeTabItem> =>
+): ReadonlyArray<TabItemNative> =>
   items.map((it) => ({
     key: it.key,
     label: it.label ?? '',
@@ -47,4 +69,5 @@ export const toNativeItems = (
     sfSymbolSelected: it.sfSymbolSelected || it.sfSymbol || '',
     imageUrl: it.imageUrl ?? '',
     badge: encodeBadge(it.badge, it.dot, badgeCap),
+    androidIconJson: encodeAndroidIcon(it.androidIcon),
   }));

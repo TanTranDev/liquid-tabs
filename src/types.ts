@@ -17,6 +17,18 @@ export type TabItem = {
   badge?: number;
   /** Chấm nhỏ không số (vd có bản update). Bị `badge` số ghi đè khi cả hai có. */
   dot?: boolean;
+  /**
+   * Icon cho ANDROID (không có SF Symbols). Cùng hình dạng với SVG đang dùng ở
+   * React nên phía gọi không phải vẽ lại: `viewBox` + danh sách path data, kèm
+   * `translate` nếu SVG gốc bọc trong `<g transform="translate(...)">`.
+   * `pathsSelected` vắng ⇒ dùng lại `paths`.
+   */
+  androidIcon?: {
+    viewBox: readonly [number, number, number, number];
+    paths: readonly string[];
+    pathsSelected?: readonly string[];
+    translate?: readonly [number, number];
+  };
 };
 
 export type LiquidTabBarProps = {

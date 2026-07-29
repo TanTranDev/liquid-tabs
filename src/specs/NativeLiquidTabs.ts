@@ -23,10 +23,24 @@ import type { EventEmitter } from 'react-native/Libraries/Types/CodegenTypes';
 export type TabItemNative = {
   key: string;
   label: string;
+  /** iOS: SF Symbol. Android bỏ qua (không có SF Symbols). */
   sfSymbol: string;
   sfSymbolSelected: string;
   imageUrl: string;
   badge: string;
+  /**
+   * ANDROID: icon dạng SVG path, JSON **string**:
+   *   {"viewBox":[0,0,512,512],"paths":["M…","M…"],"translate":[-546.2,-195.4]}
+   *   — `translate` optional, áp TRƯỚC khi scale theo viewBox (khớp <G transform>).
+   *   — `pathsSelected` optional; vắng ⇒ dùng lại `paths`.
+   *
+   * Vì sao JSON string chứ không phải object lồng: codegen xử lý object/array
+   * LỒNG trong phần tử mảng không nhất quán giữa các version RN, và một field im
+   * lặng thành undefined ở tầng C++/JNI thì rất khó truy. String là kiểu duy nhất
+   * chắc chắn đi qua nguyên vẹn; phía native parse một lần rồi cache.
+   * Rỗng ⇒ Android không có icon (rơi về `imageUrl` nếu có).
+   */
+  androidIconJson: string;
 };
 
 export type TabSelectedEvent = { key: string };
