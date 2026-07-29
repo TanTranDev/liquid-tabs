@@ -31,30 +31,16 @@ export const encodeBadge = (
 };
 
 /**
- * Icon Android → JSON string cho bridge (xem lý do chọn string ở spec).
- * Vắng / thiếu path ⇒ chuỗi RỖNG, không phải `"{}"`: native chỉ cần một phép kiểm
- * `length == 0` thay vì phải parse rồi mới biết là trống.
+ * Chuỗi SVG cho Android → dạng gửi qua bridge. Chuỗi trắng / không phải string ⇒
+ * RỖNG, để native chỉ cần một phép kiểm `length == 0` (không phải parse rồi mới
+ * biết là trống — parse SVG là việc đắt, không nên trả giá đó để biết "không có").
+ *
+ * KHÔNG validate cấu trúc SVG ở đây: đó là việc của parser native, và một
+ * validator nửa vời ở JS sẽ hoặc bác chuỗi hợp lệ, hoặc cho qua chuỗi hỏng —
+ * cả hai đều tệ hơn là để parser thật phán quyết.
  */
-export const encodeAndroidIcon = (icon: TabItem['androidIcon']): string => {
-  if (icon == null) return '';
-  const paths = icon.paths.filter((p) => typeof p === 'string' && p.trim() !== '');
-  if (paths.length === 0) return '';
-  const selected = (icon.pathsSelected ?? []).filter(
-    (p) => typeof p === 'string' && p.trim() !== '',
-  );
-  return JSON.stringify({
-    viewBox: icon.viewBox,
-    paths,
-    // LUÔN ghi tường minh, kể cả khi trùng mặc định: native đọc field này để chọn
-    // FillType, và một giá trị vắng ở đây nghĩa là native phải tự đoán — đúng chỗ
-    // sinh lỗi "lỗ trong hình bị lấp" mà không ai thấy tới lúc chạy trên máy thật.
-    fillRule: icon.fillRule ?? 'evenodd',
-    // Chỉ ghi khi KHÁC `paths` — payload đi qua bridge mỗi lần setTabs, và luật
-    // "vắng ⇒ dùng lại paths" đã nằm ở native nên ghi trùng là tốn không lý do.
-    ...(selected.length > 0 ? { pathsSelected: selected } : {}),
-    ...(icon.translate != null ? { translate: icon.translate } : {}),
-  });
-};
+export const encodeAndroidSvg = (svg: string | undefined): string =>
+  typeof svg === 'string' && svg.trim() !== '' ? svg.trim() : '';
 
 export const toNativeItems = (
   items: ReadonlyArray<TabItem>,
@@ -73,5 +59,8 @@ export const toNativeItems = (
     sfSymbolSelected: it.sfSymbolSelected || it.sfSymbol || '',
     imageUrl: it.imageUrl ?? '',
     badge: encodeBadge(it.badge, it.dot, badgeCap),
-    androidIconJson: encodeAndroidIcon(it.androidIcon),
+    androidSvg: encodeAndroidSvg(it.androidSvg),
+    // Fallback selected → thường bằng `||` (không `??`) vì lý do y như
+    // sfSymbolSelected: phía gọi có thể gửi chuỗi rỗng một cách chủ đích.
+    androidSvgSelected: encodeAndroidSvg(it.androidSvgSelected || it.androidSvg),
   }));

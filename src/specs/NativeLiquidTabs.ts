@@ -29,18 +29,22 @@ export type TabItemNative = {
   imageUrl: string;
   badge: string;
   /**
-   * ANDROID: icon dạng SVG path, JSON **string**:
-   *   {"viewBox":[0,0,512,512],"paths":["M…","M…"],"translate":[-546.2,-195.4]}
-   *   — `translate` optional, áp TRƯỚC khi scale theo viewBox (khớp <G transform>).
-   *   — `pathsSelected` optional; vắng ⇒ dùng lại `paths`.
-   *
-   * Vì sao JSON string chứ không phải object lồng: codegen xử lý object/array
-   * LỒNG trong phần tử mảng không nhất quán giữa các version RN, và một field im
-   * lặng thành undefined ở tầng C++/JNI thì rất khó truy. String là kiểu duy nhất
-   * chắc chắn đi qua nguyên vẹn; phía native parse một lần rồi cache.
+   * ANDROID: nguyên chuỗi SVG (`'<svg viewBox="0 0 24 24"><path d="…"/></svg>'`).
+   * Native parse bằng SVG parser đầy đủ nên `viewBox` / `<g transform>` /
+   * `fill-rule` nằm trong chuỗi và được xử lý sẵn — không tách field.
    * Rỗng ⇒ Android không có icon (rơi về `imageUrl` nếu có).
+   *
+   * Màu trong chuỗi bị BỎ QUA: native tint bằng ColorFilter(SRC_IN) theo trạng
+   * thái active/inactive. Nếu để native đọc màu từ SVG thì icon sẽ không đổi màu
+   * khi chọn tab, và phía gọi lại phải sinh hai chuỗi chỉ khác nhau mã màu.
+   *
+   * Vẫn là `string` (không object) vì codegen xử lý object lồng trong phần tử
+   * mảng không nhất quán giữa các version RN — nhưng ở đây string là dạng TỰ
+   * NHIÊN của dữ liệu, không phải giải pháp lách.
    */
-  androidIconJson: string;
+  androidSvg: string;
+  /** Vắng ⇒ native dùng lại `androidSvg`. */
+  androidSvgSelected: string;
 };
 
 export type TabSelectedEvent = { key: string };

@@ -18,27 +18,23 @@ export type TabItem = {
   /** Chấm nhỏ không số (vd có bản update). Bị `badge` số ghi đè khi cả hai có. */
   dot?: boolean;
   /**
-   * Icon cho ANDROID (không có SF Symbols). Cùng hình dạng với SVG đang dùng ở
-   * React nên phía gọi không phải vẽ lại: `viewBox` + danh sách path data, kèm
-   * `translate` nếu SVG gốc bọc trong `<g transform="translate(...)">`.
-   * `pathsSelected` vắng ⇒ dùng lại `paths`.
+   * Icon cho ANDROID (không có SF Symbols): **nguyên chuỗi SVG**, ví dụ
+   * `'<svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="…"/></svg>'`.
+   *
+   * Native parse bằng một SVG parser đầy đủ (androidsvg) nên phía gọi KHÔNG phải
+   * bóc path, không phải khai `viewBox`/`translate`/`fill-rule` riêng — mọi thứ
+   * đó nằm trong chuỗi và parser tự xử lý, kể cả `<g transform>` lồng nhau.
+   * Đây là lý do hợp đồng này đơn giản hơn bản bóc-path trước đó, không phải
+   * phức tạp hơn.
+   *
+   * Màu: native render rồi tint bằng `ColorFilter(SRC_IN)` theo trạng thái
+   * active/inactive, nên màu ghi trong chuỗi SVG **bị bỏ qua** — cứ để nguyên
+   * `currentColor`/`#000` cũng được.
+   *
+   * `androidSvgSelected` vắng ⇒ dùng lại `androidSvg`.
    */
-  androidIcon?: {
-    viewBox: readonly [number, number, number, number];
-    paths: readonly string[];
-    pathsSelected?: readonly string[];
-    translate?: readonly [number, number];
-    /**
-     * `fill-rule` của SVG gốc. Mặc định `'evenodd'` — KHÔNG phải `'nonzero'`.
-     *
-     * Vì sao mặc định lệch với SVG (SVG mặc định `nonzero`): `android.graphics.Path`
-     * mặc định `WINDING` (= nonzero), nên nếu quên khai thì mọi lỗ trong hình bị
-     * LẤP — icon chuông/nhà thành khối đặc. Icon thực tế của các app đi kèm đều
-     * xuất từ Figma/Illustrator với `fill-rule="evenodd"`, nên mặc định này đúng
-     * cho đa số và ca sai thì thấy ngay bằng mắt thay vì âm thầm.
-     */
-    fillRule?: 'evenodd' | 'nonzero';
-  };
+  androidSvg?: string;
+  androidSvgSelected?: string;
 };
 
 export type LiquidTabBarProps = {

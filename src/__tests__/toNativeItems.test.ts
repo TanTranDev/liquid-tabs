@@ -1,7 +1,7 @@
 import {
   toNativeItems,
   encodeBadge,
-  encodeAndroidIcon,
+  encodeAndroidSvg,
   BADGE_DOT,
   DEFAULT_BADGE_CAP,
 } from '../toNativeItems';
@@ -57,67 +57,51 @@ describe('encodeBadge — 3 trạng thái nhồi vào 1 string (codegen không c
   });
 });
 
-describe('encodeAndroidIcon — icon SVG → JSON string cho bridge', () => {
-  it('vắng icon → chuỗi RỖNG, không phải "{}"', () => {
-    // Native chỉ cần một phép kiểm length == 0; "{}" buộc nó parse rồi mới biết trống.
-    expect(encodeAndroidIcon(undefined)).toBe('');
+describe('encodeAndroidSvg — chuỗi SVG cho Android', () => {
+  it('vắng / trắng / không phải string → RỖNG (native khỏi phải parse để biết trống)', () => {
+    // Parse SVG là việc đắt; không nên trả giá đó chỉ để biết "không có icon".
+    for (const v of [undefined, '', '   ', '\n\t']) {
+      expect(encodeAndroidSvg(v as string | undefined)).toBe('');
+    }
   });
 
-  it('paths rỗng / toàn khoảng trắng → chuỗi rỗng (không gửi icon vô nghĩa)', () => {
-    expect(encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: [] })).toBe('');
-    expect(encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['', '   '] })).toBe('');
+  it('chuỗi hợp lệ → giữ nguyên, chỉ trim hai đầu', () => {
+    const svg = '<svg viewBox="0 0 24 24"><path d="M1"/></svg>';
+    expect(encodeAndroidSvg(`  ${svg}\n`)).toBe(svg);
   });
 
-  it('giữ viewBox + paths, bỏ path rỗng lẫn trong danh sách', () => {
-    const json = encodeAndroidIcon({
-      viewBox: [0, 0, 512, 512],
-      paths: ['M1', '', 'M2'],
-    });
-    expect(JSON.parse(json)).toEqual({
-      viewBox: [0, 0, 512, 512],
-      paths: ['M1', 'M2'],
-      fillRule: 'evenodd',
-    });
+  it('KHÔNG validate cấu trúc — chuỗi lạ vẫn đi qua để parser NATIVE phán quyết', () => {
+    // Validator nửa vời ở JS hoặc bác chuỗi hợp lệ, hoặc cho qua chuỗi hỏng.
+    expect(encodeAndroidSvg('<svg>chưa đóng')).toBe('<svg>chưa đóng');
   });
 
-  it('fillRule: mặc định evenodd, nhưng nonzero khai tường minh PHẢI được tôn trọng', () => {
-    // Không có ca 'nonzero' thì code hardcode 'evenodd' vẫn xanh — fixture mù.
-    const def = JSON.parse(encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'] }));
-    expect(def.fillRule).toBe('evenodd');
-    const explicit = JSON.parse(
-      encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'], fillRule: 'nonzero' }),
-    );
-    expect(explicit.fillRule).toBe('nonzero');
+  it('androidSvgSelected vắng → dùng lại androidSvg (một luật, ở tầng JS)', () => {
+    const svg = '<svg><path d="M1"/></svg>';
+    const [item] = toNativeItems([{ key: 'Chats', androidSvg: svg }]);
+    expect(item?.androidSvg).toBe(svg);
+    expect(item?.androidSvgSelected).toBe(svg);
   });
 
-  it('translate được giữ (SVG gốc bọc trong <g transform="translate(...)">)', () => {
-    const json = encodeAndroidIcon({
-      viewBox: [0, 0, 30.586, 30.586],
-      paths: ['M1'],
-      translate: [-546.269, -195.397],
-    });
-    // Mất translate ⇒ icon vẽ lệch hẳn ra ngoài ô, không phải lệch nhẹ.
-    expect(JSON.parse(json).translate).toEqual([-546.269, -195.397]);
-  });
-
-  it('pathsSelected chỉ ghi khi CÓ — vắng thì không nhồi khoá rỗng vào payload', () => {
-    const absent = JSON.parse(encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'] }));
-    expect(absent.pathsSelected).toBeUndefined();
-    expect('pathsSelected' in absent).toBe(false);
-
-    const present = JSON.parse(
-      encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'], pathsSelected: ['M2'] }),
-    );
-    expect(present.pathsSelected).toEqual(['M2']);
-  });
-
-  it('đi qua toNativeItems: có icon ⇒ JSON, không icon ⇒ rỗng', () => {
-    const [withIcon, without] = toNativeItems([
-      { key: 'Chats', androidIcon: { viewBox: [0, 0, 24, 24], paths: ['M1'] } },
-      { key: 'You' },
+  it('androidSvgSelected là chuỗi RỖNG → vẫn fallback (|| chứ không ??)', () => {
+    const svg = '<svg><path d="M1"/></svg>';
+    const [item] = toNativeItems([
+      { key: 'AIHub', androidSvg: svg, androidSvgSelected: '' },
     ]);
-    expect(JSON.parse(withIcon?.androidIconJson ?? '{}').paths).toEqual(['M1']);
-    expect(without?.androidIconJson).toBe('');
+    expect(item?.androidSvgSelected).toBe(svg);
+  });
+
+  it('androidSvgSelected khác → giữ riêng, không bị ghi đè', () => {
+    const [item] = toNativeItems([
+      { key: 'Chats', androidSvg: '<svg>a</svg>', androidSvgSelected: '<svg>b</svg>' },
+    ]);
+    expect(item?.androidSvg).toBe('<svg>a</svg>');
+    expect(item?.androidSvgSelected).toBe('<svg>b</svg>');
+  });
+
+  it('không có icon Android → cả hai field RỖNG, không undefined', () => {
+    const [item] = toNativeItems([{ key: 'You' }]);
+    expect(item?.androidSvg).toBe('');
+    expect(item?.androidSvgSelected).toBe('');
   });
 });
 
@@ -131,7 +115,8 @@ describe('toNativeItems — mọi field xuống native là string, không undefi
         sfSymbolSelected: '',
         imageUrl: '',
         badge: '',
-        androidIconJson: '',
+        androidSvg: '',
+        androidSvgSelected: '',
       },
     ]);
   });
