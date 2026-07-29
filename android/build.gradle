@@ -1,0 +1,57 @@
+buildscript {
+  repositories { google(); mavenCentral() }
+  dependencies { classpath("com.android.tools.build:gradle:8.7.2") }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+// Codegen New Architecture: plugin sinh NativeLiquidTabsSpec (abstract class) từ
+// src/specs/NativeLiquidTabs.ts vào package khai ở codegenConfig.android.
+apply plugin: 'com.facebook.react'
+
+def resolveReactNativeDir() {
+  // Không hardcode ../../react-native: dưới pnpm/hoisted đường dẫn khác nhau tuỳ
+  // layout, và đoán sai thì lỗi hiện ra ở tận lúc link, rất khó truy.
+  def resolved = providers.exec {
+    commandLine("node", "-e", "console.log(require('react-native/package.json').__dirname ?? require.resolve('react-native/package.json').replace(/\\/package\\.json$/, ''))")
+  }.standardOutput.asText.get().trim()
+  return resolved
+}
+
+android {
+  namespace 'com.tantrancover.liquidtabs'
+  compileSdk 35
+
+  defaultConfig {
+    minSdk 24
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  kotlinOptions { jvmTarget = '17' }
+
+  sourceSets {
+    main {
+      java.srcDirs += ["${project.buildDir}/generated/source/codegen/java"]
+    }
+  }
+}
+
+repositories { google(); mavenCentral() }
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation 'androidx.core:core-ktx:1.13.1'
+  // Parser SVG đầy đủ — USER chốt 29/07 thay cho PathParser: xử lý viewBox,
+  // <g transform> lồng nhau, fill-rule, gradient, clip-path. ~100KB.
+  implementation 'com.caverock:androidsvg-aar:1.4'
+}
+
+react {
+  jsRootDir = file("../src/specs")
+  libraryName = "liquidtabs"
+  codegenJavaPackageName = "com.tantrancover.liquidtabs"
+}
