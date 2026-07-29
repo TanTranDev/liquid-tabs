@@ -15,11 +15,6 @@ static const CGFloat kLensSpringDamping = 0.86;
 // UIGlassContainerEffect là "khoảng cách mà các phần tử BẮT ĐẦU hợp nhất" — rất có
 // thể UIKit đang hợp nhất lens vào platter, tức lens tan vào nền. Chưa phân định
 // được trên máy; `setMergeSpacing` là núm xoay để thử (0 = không hợp nhất).
-static const CGFloat kLensStretchMax = 26.0;
-/// Đổi tốc độ ngón (pt/s) thành lượng giãn. 1200 pt/s ⇒ chạm trần.
-static const CGFloat kLensStretchPerVelocity = kLensStretchMax / 1200.0;
-/// Giãn ngang thì bẹp dọc — giữ cảm giác BẢO TOÀN THỂ TÍCH của khối nước.
-static const CGFloat kLensSquashRatio = 0.18;
 /// Ngưỡng coi là "kéo" thay vì "chạm", để tap không bị hiểu thành vuốt 1px.
 static const CGFloat kDragSlop = 6.0;
 /// Nếu phía JS không xác nhận lựa chọn trong khoảng này, trả highlight về sự thật.
@@ -50,14 +45,24 @@ static UIColor *LTBFallbackEdge(void)
   }];
 }
 
-/// Lens của nhánh fallback: một lớp sáng/tối nhẹ, KHÔNG viền — viền thẳng đọc
-/// thành artifact (luật B4 của hồ sơ: cấm strip giả specular).
-static UIColor *LTBFallbackLensFill(void)
+/// Màu MẶC ĐỊNH của vùng chọn. Giá trị lấy nguyên từ `tokens.color.brand.soft` của
+/// mini-app (accent-soft) — chính pill mà bản TabBar JS đang vẽ và đã được duyệt bằng
+/// mắt. Phía gọi nên ghi đè qua `setLensColor:` để theme sống ở JS; hằng này chỉ để
+/// thư viện dùng được ngay khi chưa ai truyền gì.
+///
+/// ⚠️ Vùng chọn KHÔNG dùng UIGlassEffect, dù bar đang ở chế độ kính. Hai lý do đo
+/// được: (1) alpha của accent-soft là 0.10 — một khối kính tint ở alpha đó gần như vô
+/// hình, và kính-trên-kính thì không có tương phản; (2) lens nằm TRỌN trong platter
+/// nên khoảng cách hai khối kính là 0, mà `UIGlassContainerEffect.spacing` là "khoảng
+/// cách mà các phần tử BẮT ĐẦU hợp nhất" ⇒ UIKit hợp nhất lens VÀO platter, tức lens
+/// tan vào nền. Đó là hiện tượng user báo 29/07: "lướt được rồi nhưng không có vùng
+/// chọn". Pill phẳng có tint là đúng thứ bản JS vẽ, và là đúng thứ cần khớp.
+static UIColor *LTBDefaultLensFill(void)
 {
   return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
     return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-        ? [UIColor colorWithWhite:1.0 alpha:0.10]
-        : [UIColor colorWithWhite:0.0 alpha:0.05];
+        ? [UIColor colorWithRed:82 / 255.0 green:156 / 255.0 blue:202 / 255.0 alpha:0.16]
+        : [UIColor colorWithRed:35 / 255.0 green:131 / 255.0 blue:226 / 255.0 alpha:0.10];
   }];
 }
 
@@ -65,10 +70,14 @@ static UIColor *LTBFallbackLensFill(void)
   // Nhánh kính
   UIVisualEffectView *_container;
   UIVisualEffectView *_platter;
-  UIVisualEffectView *_glassLens;
   // Nhánh fallback
   UIView *_fallbackBg;
-  UIView *_fallbackLens;
+
+  /// Vùng chọn — MỘT view cho CẢ HAI chế độ nền, luôn là UIView tint phẳng (xem
+  /// `LTBDefaultLensFill` về lý do không dùng kính ở đây). Trước đây có hai lens
+  /// riêng cho hai nhánh; gộp lại vì toàn bộ logic vuốt/morph không quan tâm nền là
+  /// gì, và hai đường song song chỉ tạo chỗ cho một nhánh câm.
+  UIView *_lens;
 
   UIView *_itemsHost;
   NSMutableArray<LTBItemView *> *_items;
@@ -120,10 +129,17 @@ static UIColor *LTBFallbackLensFill(void)
     _tintInactive = UIColor.secondaryLabelColor;
     _useGlass = [LTBBarView isGlassAvailable];
 
-    // Cắt theo bounds: bug 02/07 là glass phủ TOÀN MÀN HÌNH vì wrapper thứ ba cố
-    // ý masksToBounds = NO. Đánh đổi đã biết: animation merge phình ra ngoài frame
-    // sẽ bị cắt — [device-verify] rồi quyết, đổi cờ này là một dòng.
-    self.clipsToBounds = YES;
+    // KHÔNG cắt. Hiệu ứng Liquid Glass của lens PHẢI tràn ra ngoài mép bar mới thấy
+    // được: đo trên bản tham chiếu (App Store iOS 26 + clip user gửi 29/07), khối kính
+    // chọn phình cao hơn cả platter và mang viền tán sắc cầu vồng — phần tràn đó CHÍNH
+    // LÀ phần nhìn thấy. Bản trước đặt YES nên cắt sạch, và triệu chứng là "lướt được
+    // nhưng không có vùng chọn, không có morph".
+    //
+    // Vì sao an toàn (khác bug 02/07 "glass phủ toàn màn hình"): ca đó là một WRAPPER
+    // mang chính UIGlassEffect và có frame cỡ màn hình. Ở đây `self` là UIView TRƠN,
+    // không mang effect nào; mọi view mang kính (`_container`, `_platter`, `_lens`) đều
+    // có frame bám bounds của bar hoặc nhỏ hơn. Không có đường nào để kính lan ra màn.
+    self.clipsToBounds = NO;
 
     _itemsHost = [UIView new];
     _pendingKey = @"";
@@ -167,18 +183,25 @@ static UIColor *LTBFallbackLensFill(void)
     _platter.clipsToBounds = YES;
     [_container.contentView addSubview:_platter];
 
+    // Vùng chọn = KHỐI KÍNH THẬT, để UIKit tự lo morph. Đây là điểm cốt lõi: hiệu
+    // ứng "bóng nước" khi lướt là do UIGlassEffect + UIGlassContainerEffect sinh ra,
+    // KHÔNG phải do ta vẽ. Bằng chứng nó là kính native: mép khối mang tán sắc cầu
+    // vồng — không view tự vẽ nào tạo được (xem App Store iOS 26, tab "Games").
     UIGlassEffect *lensEffect = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+    // `interactive` = khối kính phản ứng theo chạm (nhún/phình). Chính nó tạo cảm
+    // giác chất lỏng khi ngón kéo.
     lensEffect.interactive = YES;
-    _glassLens = [[UIVisualEffectView alloc] initWithEffect:lensEffect];
-    _glassLens.layer.cornerCurve = kCACornerCurveContinuous;
-    // Bo góc = NỬA CHIỀU CAO (đặt trong layoutSubviews) ⇒ capsule. Trước đây cố định
-    // 18 nên dù có hiệu ứng vẫn đọc thành "ô vuông bo", không ra hình giọt nước.
-    // KHÔNG clip: phần phình của hiệu ứng merge nằm NGOÀI bounds của lens, cắt là
-    // mất sạch. `self.clipsToBounds` vẫn giữ YES — đó là lưới chống bug 02/07
-    // (kính phủ toàn màn hình), và nó chặn ở mép bar chứ không chặn ở mép lens.
-    _glassLens.clipsToBounds = NO;
-    _glassLens.hidden = YES;
-    [_container.contentView addSubview:_glassLens];
+    UIVisualEffectView *glassLens = [[UIVisualEffectView alloc] initWithEffect:lensEffect];
+    glassLens.layer.cornerCurve = kCACornerCurveContinuous;
+    // KHÔNG clip: phần phình của morph nằm NGOÀI bounds của lens.
+    glassLens.clipsToBounds = NO;
+    glassLens.userInteractionEnabled = NO;  // không được ăn tap của item nằm trên
+    glassLens.hidden = YES;
+    _lens = glassLens;
+    // Lens nằm TRÊN platter, DƯỚI itemsHost (itemsHost được add sau, ở init).
+    [_container.contentView addSubview:_lens];
+    // Container cũng không được cắt, nếu không nó chặn đúng phần tràn vừa mở ở `self`.
+    _container.clipsToBounds = NO;
   }
 }
 
@@ -192,14 +215,17 @@ static UIColor *LTBFallbackLensFill(void)
   _fallbackBg.clipsToBounds = YES;
   [self addSubview:_fallbackBg];
 
-  _fallbackLens = [UIView new];
-  _fallbackLens.backgroundColor = LTBFallbackLensFill();
-  _fallbackLens.layer.cornerCurve = kCACornerCurveContinuous;
-  // Radius do `applyCapsuleRadiusTo:` đặt theo chiều cao thật (capsule), giống nhánh
-  // kính — hằng cố định 18 đã bỏ. Nhánh này cũng vuốt được: mọi logic vuốt nằm ở
-  // LTBBarView, `activeLens` chỉ chọn xem đang lái khối nào.
-  _fallbackLens.hidden = YES;
-  [_fallbackBg addSubview:_fallbackLens];
+  // Nhánh KHÔNG kính (iOS < 26): chỉ cần VÙNG CHỌN, không cần hiệu ứng (USER chốt
+  // 29/07). Pill tint phẳng, trượt sang ô mới — không morph, không giãn. Cố mô phỏng
+  // "bóng nước" bằng UIView ở đây là làm giả một thứ mà nền tảng không có.
+  UIView *plainLens = [UIView new];
+  plainLens.backgroundColor = LTBDefaultLensFill();
+  plainLens.layer.cornerCurve = kCACornerCurveContinuous;
+  plainLens.userInteractionEnabled = NO;
+  plainLens.hidden = YES;
+  _lens = plainLens;
+  // Con của SELF, không của `_fallbackBg` — thằng đó clip theo bounds.
+  [self addSubview:_lens];
 }
 
 // borderColor là CGColor nên KHÔNG tự đổi theo trait — phải gán lại. Thiếu bước
@@ -285,6 +311,29 @@ static UIColor *LTBFallbackLensFill(void)
   if (active != nil) _tintActive = active;
   if (inactive != nil) _tintInactive = inactive;
   [self reconfigureItems];
+}
+
+/// Màu vùng chọn. Theme sống ở JS nên phía gọi truyền xuống; nil ⇒ giữ màu hiện tại
+/// (KHÔNG tô trong suốt — mất vùng chọn mà không có lỗi ở đâu là đúng lớp lỗi im lặng
+/// vừa mất một buổi để truy).
+- (void)setLensColor:(UIColor *)color
+{
+  if (color == nil) return;
+  if (!_useGlass) {
+    _lens.backgroundColor = color;
+    return;
+  }
+  if (@available(iOS 26.0, *)) {
+    // Nhánh kính: màu đi vào `tintColor` của effect, KHÔNG vào backgroundColor —
+    // backgroundColor sẽ đè lên vật liệu kính và giết luôn tán sắc ở mép.
+    // Dựng effect mới ở đây là có kiểm soát: chỉ khi màu đổi thật, tức gần như không
+    // bao giờ sau lần đầu. (Gán `.effect` MỖI LẦN đổi tint là đúng lỗi đã giết wrapper
+    // thứ ba hồi 02/07 — đừng gọi hàm này trong vòng render.)
+    UIGlassEffect *e = [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular];
+    e.interactive = YES;
+    e.tintColor = color;
+    ((UIVisualEffectView *)_lens).effect = e;
+  }
 }
 
 - (void)setMergeSpacing:(CGFloat)spacing
@@ -388,7 +437,7 @@ static UIColor *LTBFallbackLensFill(void)
         _pendingKey = key;
         [self reconfigureItems];
       }
-      [self layoutLensFollowingX:x velocityX:[g velocityInView:self].x];
+      [self layoutLensFollowingX:x];
       break;
     }
     case UIGestureRecognizerStateEnded:
@@ -434,7 +483,7 @@ static UIColor *LTBFallbackLensFill(void)
 
 - (UIView *_Nullable)activeLens
 {
-  return _useGlass ? _glassLens : _fallbackLens;
+  return _lens;
 }
 
 /// Hình nghỉ của lens tại một item.
@@ -450,26 +499,28 @@ static UIColor *LTBFallbackLensFill(void)
   lens.layer.cornerRadius = lens.bounds.size.height / 2.0;
 }
 
-/// Lens ĐI THEO NGÓN. Không animate: mỗi frame một vị trí, đó chính là cảm giác
-/// "dính ngón". Phần "nước" nằm ở giãn ngang theo tốc độ + bẹp dọc bù lại.
-- (void)layoutLensFollowingX:(CGFloat)x velocityX:(CGFloat)vx
+/// Lens ĐI THEO NGÓN. Chỉ đổi VỊ TRÍ, giữ nguyên kích thước.
+///
+/// Cố ý KHÔNG tự giãn/bẹp: trên iOS 26 hiệu ứng chất lỏng do UIGlassEffect sinh ra,
+/// tự vẽ thêm là hai animation đánh nhau — và bản tự vẽ không bao giờ có tán sắc ở mép
+/// nên nó lộ ra là đồ giả. Trên nhánh không kính thì USER chốt KHÔNG cần hiệu ứng, chỉ
+/// cần vùng chọn. Cả hai đường đều dẫn tới: chỉ dời chỗ.
+///
+/// Không bọc trong khối animation: mỗi frame một vị trí — đó chính là cảm giác dính ngón.
+- (void)layoutLensFollowingX:(CGFloat)x
 {
   UIView *lens = [self activeLens];
   if (lens == nil || _dragIndex < 0) return;
 
   const CGRect rest = [self lensRestRectForIndex:_dragIndex];
-  const CGFloat stretch = MIN(kLensStretchMax, fabs(vx) * kLensStretchPerVelocity);
-  const CGFloat squash = stretch * kLensSquashRatio;
-  const CGFloat w = rest.size.width + stretch;
-  const CGFloat h = MAX(1.0, rest.size.height - squash);
-
-  // Tâm dính ngón, nhưng kẹp để lens không tràn khỏi platter.
-  const CGFloat minCX = kLensInsetX + w / 2.0;
-  const CGFloat maxCX = self.bounds.size.width - kLensInsetX - w / 2.0;
+  // Tâm dính ngón, kẹp để lens không trượt khỏi hai đầu bar.
+  const CGFloat minCX = kLensInsetX + rest.size.width / 2.0;
+  const CGFloat maxCX = self.bounds.size.width - kLensInsetX - rest.size.width / 2.0;
   const CGFloat cx = MAX(minCX, MIN(maxCX, x));
 
   lens.hidden = NO;
-  lens.frame = CGRectMake(cx - w / 2.0, rest.origin.y + squash / 2.0, w, h);
+  lens.frame = CGRectMake(cx - rest.size.width / 2.0, rest.origin.y, rest.size.width,
+                          rest.size.height);
   [self applyCapsuleRadiusTo:lens];
 }
 

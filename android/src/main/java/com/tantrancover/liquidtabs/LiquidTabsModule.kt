@@ -154,6 +154,12 @@ class LiquidTabsModule(reactContext: ReactApplicationContext) :
     onUi { view -> view.setTint(a ?: Color.BLACK, i ?: Color.GRAY) }
   }
 
+  override fun setLensColor(hex: String?) {
+    // nil/hex sai ⇒ KHÔNG gọi xuống: view giữ màu hiện tại. Tô trong suốt ở đây là
+    // mất vùng chọn mà không có lỗi ở đâu.
+    parseHex(hex)?.let { c -> onUi { view -> view.setLensColor(c) } }
+  }
+
   /** Android không có glass nên merge-spacing vô nghĩa — nhận rồi bỏ qua, KHÔNG
    *  ném lỗi: phía gọi dùng cùng một đoạn code cho hai nền tảng. */
   override fun setMergeSpacing(spacing: Double) = Unit

@@ -23,6 +23,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setItems:(NSArray<NSDictionary<NSString *, NSString *> *> *)items;
 - (void)setActiveKey:(NSString *)key;
 - (void)setTintActive:(UIColor *)active inactive:(UIColor *)inactive;
+
+/// Màu vùng chọn (pill sau tab đang chọn). nil ⇒ giữ màu hiện tại.
+- (void)setLensColor:(UIColor *)color;
+
 - (void)setMergeSpacing:(CGFloat)spacing;
 
 /// Bo góc nền. Chiều cao/inset do host đặt qua frame.

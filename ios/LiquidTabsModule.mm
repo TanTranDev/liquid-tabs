@@ -189,6 +189,14 @@ RCT_EXPORT_MODULE(LiquidTabs)
   }];
 }
 
+- (void)setLensColor:(NSString *)hex
+{
+  UIColor *c = LTBColorFromHex(hex);
+  [self onMain:^(LTBBarView *bar) {
+    [bar setLensColor:c];
+  }];
+}
+
 - (void)setMergeSpacing:(double)spacing
 {
   [self onMain:^(LTBBarView *bar) {

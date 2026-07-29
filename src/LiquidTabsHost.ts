@@ -112,6 +112,12 @@ export const LiquidTabsHost = {
     mod()?.setTint(activeHex, inactiveHex);
   },
 
+  /** Màu vùng chọn (pill sau tab đang chọn), hex `#RRGGBB` / `#RRGGBBAA`. Không gọi
+   *  ⇒ thư viện dùng mặc định accent-soft. */
+  setLensColor(hex: string): void {
+    mod()?.setLensColor(hex);
+  },
+
   setMergeSpacing(spacing: number): void {
     mod()?.setMergeSpacing(spacing);
   },

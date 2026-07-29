@@ -15,7 +15,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
 import android.view.MotionEvent
-import android.view.VelocityTracker
 import android.view.View
 import kotlin.math.abs
 import kotlin.math.max
@@ -54,6 +53,8 @@ class LTBBarView(context: Context) : View(context) {
   private var cornerRadius = dp(32f)
   private var tintActive = Color.BLACK
   private var tintInactive = Color.GRAY
+  /** Màu vùng chọn do JS truyền; null = dùng mặc định của thư viện. */
+  private var lensColorOverride: Int? = null
 
   // ── Vật liệu nền: khớp GlassSurface của mini-app ([device-verify] 18/07).
   //    Tint đục ~92% + hairline định biên. Dark dùng hairline SÁNG-trên-tối vì
@@ -81,20 +82,20 @@ class LTBBarView(context: Context) : View(context) {
   private var lensAnim: ValueAnimator? = null
 
   /** TÂM của lens theo trục X; -1 = không có tab nào để vẽ. Dùng tâm (không phải mép
-   *  trái như bản trước) vì lúc vuốt lens dính theo ngón và giãn hai phía — mép trái
-   *  không còn là đại lượng tự nhiên. */
+   *  trái như bản trước) vì lúc vuốt nó dính theo ngón, mép trái không còn là đại
+   *  lượng tự nhiên. */
   private var lensCenterX = -1f
 
   // ── Vuốt-để-chọn (yêu cầu USER 29/07). Cùng luật với iOS: lens theo ngón liên
-  //    tục, tab chỉ đổi khi NHẢ tay. "Bóng nước" ở Android là do TA vẽ (giãn ngang
-  //    theo tốc độ + bẹp dọc bù lại) — nền tảng này không có vật liệu kính.
+  //    tục, tab chỉ đổi khi NHẢ tay.
+  //    Android CHỈ có vùng chọn, KHÔNG có hiệu ứng chất lỏng (USER chốt 29/07): hiệu
+  //    ứng đó là vật liệu của UIGlassEffect trên iOS 26, mô phỏng bằng Canvas sẽ ra
+  //    đồ giả — không bao giờ có tán sắc ở mép như bản thật.
   /** Tab đang VẼ nhưng JS chưa xác nhận. Rỗng = không có. Chống nháy một nhịp bridge. */
   private var pendingKey: String = ""
   /** Index dưới ngón khi đang kéo; -1 = không kéo. */
   private var dragIndex = -1
   private var downX = 0f
-  private var lensStretch = 0f
-  private var velocityTracker: VelocityTracker? = null
   private val pendingHandler = Handler(Looper.getMainLooper())
   private val revertPending = Runnable {
     if (pendingKey.isNotEmpty()) {
@@ -125,12 +126,25 @@ class LTBBarView(context: Context) : View(context) {
     if (isDark()) {
       fillPaint.color = Color.argb((0.94f * 255).toInt(), 44, 44, 46)
       edgePaint.color = Color.argb((0.14f * 255).toInt(), 255, 255, 255)
-      lensPaint.color = Color.argb((0.10f * 255).toInt(), 255, 255, 255)
     } else {
       fillPaint.color = Color.argb((0.92f * 255).toInt(), 252, 252, 252)
       edgePaint.color = Color.argb((0.06f * 255).toInt(), 0, 0, 0)
-      lensPaint.color = Color.argb((0.05f * 255).toInt(), 0, 0, 0)
     }
+    // Lens: giữ màu JS truyền xuống nếu có. Không có nhánh này thì đổi Dark/Light lúc
+    // đang chạy sẽ ÂM THẦM ghi đè màu của app bằng màu mặc định của thư viện.
+    lensPaint.color = lensColorOverride ?: defaultLensColor()
+  }
+
+  /** Mặc định = `tokens.color.brand.soft` của mini-app (accent-soft) — chính pill mà
+   *  bản TabBar JS vẽ. Chỉ dùng khi phía gọi chưa truyền màu. */
+  private fun defaultLensColor(): Int =
+    if (isDark()) Color.argb((0.16f * 255).toInt(), 82, 156, 202)
+    else Color.argb((0.10f * 255).toInt(), 35, 131, 226)
+
+  fun setLensColor(color: Int) {
+    lensColorOverride = color
+    lensPaint.color = color
+    invalidate()
   }
 
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration?) {
@@ -179,8 +193,6 @@ class LTBBarView(context: Context) : View(context) {
     // đã rời window.
     pendingHandler.removeCallbacks(revertPending)
     lensAnim?.cancel()
-    velocityTracker?.recycle()
-    velocityTracker = null
   }
 
   fun setTint(active: Int, inactive: Int) {
@@ -218,7 +230,6 @@ class LTBBarView(context: Context) : View(context) {
   private fun snapLens() {
     val i = activeIndex()
     lensCenterX = if (i < 0) -1f else restCenterX(i)
-    lensStretch = 0f
   }
 
   private fun animateLens() {
@@ -226,15 +237,12 @@ class LTBBarView(context: Context) : View(context) {
     if (i < 0) { lensCenterX = -1f; invalidate(); return }
     val target = restCenterX(i)
     val from = if (lensCenterX < 0f) target else lensCenterX
-    val fromStretch = lensStretch
     lensAnim?.cancel()
     lensAnim = ValueAnimator.ofFloat(0f, 1f).apply {
       duration = LENS_ANIM_MS
       addUpdateListener {
         val t = it.animatedValue as Float
         lensCenterX = from + (target - from) * t
-        // Giãn co về 0 cùng lúc ⇒ khối nước "đàn" lại thay vì nhảy về hình nghỉ.
-        lensStretch = fromStretch * (1f - t)
         invalidate()
       }
       start()
@@ -255,18 +263,17 @@ class LTBBarView(context: Context) : View(context) {
     val iw = itemWidth()
 
     if (lensCenterX >= 0f) {
-      val restW = iw - dp(4f) * 2f
-      val restH = height - dp(6f) * 2f
-      val w = restW + lensStretch
-      val h = max(1f, restH - lensStretch * LENS_SQUASH_RATIO)
+      // Android KHÔNG có vật liệu Liquid Glass ⇒ chỉ vẽ VÙNG CHỌN, không mô phỏng
+      // hiệu ứng chất lỏng (USER chốt 29/07). Kích thước cố định, chỉ dời chỗ.
+      val w = iw - dp(4f) * 2f
+      val h = height - dp(6f) * 2f
       // Kẹp tâm để lens không tràn khỏi nền bar.
       val minCX = dp(4f) + w / 2f
       val maxCX = width - dp(4f) - w / 2f
       val cx = if (minCX > maxCX) width / 2f else max(minCX, min(maxCX, lensCenterX))
       val cy = height / 2f
       lensRect.set(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
-      // Capsule: bán kính = nửa chiều cao HIỆN TẠI (bản trước cố định 18dp nên lúc
-      // bẹp sẽ ra hình viên thuốc méo).
+      // Capsule: bán kính = nửa chiều cao (bản trước cố định 18dp).
       val r = h / 2f
       canvas.drawRoundRect(lensRect, r, r, lensPaint)
     }
@@ -407,15 +414,12 @@ class LTBBarView(context: Context) : View(context) {
       MotionEvent.ACTION_DOWN -> {
         downX = event.x
         dragIndex = -1
-        velocityTracker?.recycle()
-        velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
         // PHẢI trả true ở DOWN, nếu không Android không gửi MOVE/UP tiếp — đó là lý
         // do bản trước (chỉ bắt ACTION_UP) không thể vuốt được.
         return true
       }
 
       MotionEvent.ACTION_MOVE -> {
-        velocityTracker?.addMovement(event)
         // Ngưỡng slop chỉ tính trục X: vuốt DỌC (vd kéo lên đóng app) không được
         // biến thành đổi tab.
         if (dragIndex < 0 && abs(event.x - downX) < dp(DRAG_SLOP_DP)) return true
@@ -426,19 +430,12 @@ class LTBBarView(context: Context) : View(context) {
         // Highlight theo ngón NGAY, nhưng KHÔNG báo JS (USER chốt: đổi màn khi nhả).
         if (key != visualActiveKey()) pendingKey = key
         lensAnim?.cancel()
-        val vx = velocityTracker?.let {
-          it.computeCurrentVelocity(1000)
-          it.xVelocity
-        } ?: 0f
         lensCenterX = event.x
-        lensStretch = min(dp(LENS_STRETCH_MAX_DP), abs(vx) * dp(LENS_STRETCH_MAX_DP) / STRETCH_VEL_FULL)
         invalidate()
         return true
       }
 
       MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-        velocityTracker?.recycle()
-        velocityTracker = null
         val dragged = dragIndex >= 0
         val idx = if (dragged) dragIndex else indexAtX(event.x)
         dragIndex = -1
@@ -461,12 +458,6 @@ class LTBBarView(context: Context) : View(context) {
 
   private companion object {
     const val LENS_ANIM_MS = 320L
-    /** Giãn ngang tối đa (dp) khi ngón đi nhanh. */
-    const val LENS_STRETCH_MAX_DP = 26f
-    /** Tốc độ (px/s) tại đó giãn chạm trần. */
-    const val STRETCH_VEL_FULL = 1200f
-    /** Giãn ngang thì bẹp dọc — giữ cảm giác bảo toàn thể tích. */
-    const val LENS_SQUASH_RATIO = 0.18f
     const val DRAG_SLOP_DP = 6f
     /** JS không xác nhận trong khoảng này ⇒ trả highlight về sự thật. */
     const val PENDING_REVERT_MS = 600L

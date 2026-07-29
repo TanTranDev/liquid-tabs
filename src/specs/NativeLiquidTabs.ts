@@ -84,12 +84,25 @@ export interface Spec extends TurboModule {
     cornerRadius: number,
   ): void;
 
-  /** Màu icon/nhãn/lens. Chuỗi hex `#RRGGBB` hoặc `#RRGGBBAA`. Truyền tường minh
-   *  chứ không để native lấy màu hệ — nếu app ép theme thì màu hệ sẽ lệch. */
+  /** Màu icon/nhãn. Chuỗi hex `#RRGGBB` hoặc `#RRGGBBAA`. Truyền tường minh chứ
+   *  không để native lấy màu hệ — nếu app ép theme thì màu hệ sẽ lệch. */
   setTint(activeHex: string, inactiveHex: string): void;
 
-  /** `spacing` của UIGlassContainerEffect — khoảng cách lens và nền bắt đầu
-   *  MERGE (hiệu ứng liquid). 0 ⇒ không merge. */
+  /** Màu VÙNG CHỌN (pill sau tab đang chọn), hex `#RRGGBB` / `#RRGGBBAA`.
+   *
+   *  Tách khỏi `setTint` vì đây là màu NỀN, không phải màu icon — và vì theme phải
+   *  sống ở JS: native mà tự đoán thì hai bên drift mà không có gì báo. Không gọi ⇒
+   *  thư viện dùng mặc định accent-soft.
+   *
+   *  Vùng chọn KHÔNG phải khối kính, kể cả trên iOS 26: alpha của accent-soft là
+   *  0.10 nên kính-trên-kính không có tương phản, và `UIGlassContainerEffect` hợp
+   *  nhất lens VÀO platter (lens nằm trọn trong platter ⇒ khoảng cách 0) ⇒ lens tan
+   *  vào nền. Đã gặp thật trên device 29/07. */
+  setLensColor(hex: string): void;
+
+  /** `spacing` của UIGlassContainerEffect — khoảng cách các khối kính bắt đầu MERGE.
+   *  Chỉ còn ảnh hưởng tới platter; vùng chọn không dùng kính (xem `setLensColor`).
+   *  Android bỏ qua. */
   setMergeSpacing(spacing: number): void;
 
   readonly onTabSelected: EventEmitter<TabSelectedEvent>;
