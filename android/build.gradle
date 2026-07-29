@@ -10,15 +10,11 @@ apply plugin: 'kotlin-android'
 // src/specs/NativeLiquidTabs.ts vào package khai ở codegenConfig.android.
 apply plugin: 'com.facebook.react'
 
-def resolveReactNativeDir() {
-  // Không hardcode ../../react-native: dưới pnpm/hoisted đường dẫn khác nhau tuỳ
-  // layout, và đoán sai thì lỗi hiện ra ở tận lúc link, rất khó truy.
-  def resolved = providers.exec {
-    commandLine("node", "-e", "console.log(require('react-native/package.json').__dirname ?? require.resolve('react-native/package.json').replace(/\\/package\\.json$/, ''))")
-  }.standardOutput.asText.get().trim()
-  return resolved
-}
-
+// Không tự phân giải đường dẫn react-native ở đây: plugin `com.facebook.react` đã lo,
+// và bản trước có một hàm `resolveReactNativeDir()` KHÔNG ai gọi — dead code duy nhất
+// tác dụng là làm VỠ parse Groovy (regex JS `/…$/` trong GString ⇒ "token recognition
+// error at '/'"). Nó sống được tới 29/07 vì Android chưa build lần nào; lần assemble
+// đầu tiên là lần nó bị phát hiện.
 android {
   namespace 'com.tantrancover.liquidtabs'
   compileSdk 35
