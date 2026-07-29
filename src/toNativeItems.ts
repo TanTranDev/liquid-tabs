@@ -45,6 +45,10 @@ export const encodeAndroidIcon = (icon: TabItem['androidIcon']): string => {
   return JSON.stringify({
     viewBox: icon.viewBox,
     paths,
+    // LUÔN ghi tường minh, kể cả khi trùng mặc định: native đọc field này để chọn
+    // FillType, và một giá trị vắng ở đây nghĩa là native phải tự đoán — đúng chỗ
+    // sinh lỗi "lỗ trong hình bị lấp" mà không ai thấy tới lúc chạy trên máy thật.
+    fillRule: icon.fillRule ?? 'evenodd',
     // Chỉ ghi khi KHÁC `paths` — payload đi qua bridge mỗi lần setTabs, và luật
     // "vắng ⇒ dùng lại paths" đã nằm ở native nên ghi trùng là tốn không lý do.
     ...(selected.length > 0 ? { pathsSelected: selected } : {}),

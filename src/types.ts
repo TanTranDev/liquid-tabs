@@ -28,6 +28,16 @@ export type TabItem = {
     paths: readonly string[];
     pathsSelected?: readonly string[];
     translate?: readonly [number, number];
+    /**
+     * `fill-rule` của SVG gốc. Mặc định `'evenodd'` — KHÔNG phải `'nonzero'`.
+     *
+     * Vì sao mặc định lệch với SVG (SVG mặc định `nonzero`): `android.graphics.Path`
+     * mặc định `WINDING` (= nonzero), nên nếu quên khai thì mọi lỗ trong hình bị
+     * LẤP — icon chuông/nhà thành khối đặc. Icon thực tế của các app đi kèm đều
+     * xuất từ Figma/Illustrator với `fill-rule="evenodd"`, nên mặc định này đúng
+     * cho đa số và ca sai thì thấy ngay bằng mắt thay vì âm thầm.
+     */
+    fillRule?: 'evenodd' | 'nonzero';
   };
 };
 

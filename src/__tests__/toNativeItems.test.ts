@@ -73,7 +73,21 @@ describe('encodeAndroidIcon — icon SVG → JSON string cho bridge', () => {
       viewBox: [0, 0, 512, 512],
       paths: ['M1', '', 'M2'],
     });
-    expect(JSON.parse(json)).toEqual({ viewBox: [0, 0, 512, 512], paths: ['M1', 'M2'] });
+    expect(JSON.parse(json)).toEqual({
+      viewBox: [0, 0, 512, 512],
+      paths: ['M1', 'M2'],
+      fillRule: 'evenodd',
+    });
+  });
+
+  it('fillRule: mặc định evenodd, nhưng nonzero khai tường minh PHẢI được tôn trọng', () => {
+    // Không có ca 'nonzero' thì code hardcode 'evenodd' vẫn xanh — fixture mù.
+    const def = JSON.parse(encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'] }));
+    expect(def.fillRule).toBe('evenodd');
+    const explicit = JSON.parse(
+      encodeAndroidIcon({ viewBox: [0, 0, 24, 24], paths: ['M1'], fillRule: 'nonzero' }),
+    );
+    expect(explicit.fillRule).toBe('nonzero');
   });
 
   it('translate được giữ (SVG gốc bọc trong <g transform="translate(...)">)', () => {
