@@ -1,6 +1,6 @@
 {
   "name": "@tantrancover/liquid-tabs",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Floating Liquid Glass tab bar for iOS 26+ (bar only) — built on public UIGlassEffect / UIGlassContainerEffect. Host provides the native view; mini-apps consume it as a Module Federation shared singleton.",
   "license": "UNLICENSED",
   "private": false,

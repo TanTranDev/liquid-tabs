@@ -1,6 +1,5 @@
 package com.tantrancover.liquidtabs
 
-import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -84,7 +83,6 @@ class LTBBarView(context: Context) : View(context) {
 
   private val barRect = RectF()
   private val lensRect = RectF()
-  private var lensAnim: ValueAnimator? = null
 
   /** TÂM của lens theo trục X; -1 = không có tab nào để vẽ. Dùng tâm (không phải mép
    *  trái như bản trước) vì lúc vuốt nó dính theo ngón, mép trái không còn là đại
@@ -108,7 +106,7 @@ class LTBBarView(context: Context) : View(context) {
       // Reset bộ đếm ở đây là thứ chặn drift của nó (re-tap bắn `onSelect` mà JS không echo
       // lại ⇒ đếm dư). Nhờ vậy lệch chỉ sống trong một cửa sổ PENDING_REVERT_MS.
       outstandingEchoes = 0
-      animateLens()
+      snapLens()
       invalidate()
     }
   }
@@ -192,7 +190,10 @@ class LTBBarView(context: Context) : View(context) {
     if (!changed && !wasPending) return
     // Đang kéo thì ngón là chủ, không giật lens về ô nghỉ giữa cú vuốt.
     if (dragIndex >= 0) { invalidate(); return }
-    if (had) animateLens() else { snapLens(); invalidate() }
+    // TỨC THÌ ở cả hai nhánh (USER chốt 30/07). Bản trước phân biệt `had` để trượt lens từ ô
+    // cũ sang ô mới; giờ không còn animation nào để phân biệt, nên một đường duy nhất.
+    snapLens()
+    invalidate()
   }
 
   /** Tab đang VẼ. Khác [activeKey] khi đang chờ JS xác nhận. */
@@ -213,7 +214,6 @@ class LTBBarView(context: Context) : View(context) {
     // Handler giữ tham chiếu tới view — không dọn là callback vẫn chạy sau khi bar
     // đã rời window.
     pendingHandler.removeCallbacks(revertPending)
-    lensAnim?.cancel()
   }
 
   fun setTint(active: Int, inactive: Int) {
@@ -253,22 +253,6 @@ class LTBBarView(context: Context) : View(context) {
     lensCenterX = if (i < 0) -1f else restCenterX(i)
   }
 
-  private fun animateLens() {
-    val i = activeIndex()
-    if (i < 0) { lensCenterX = -1f; invalidate(); return }
-    val target = restCenterX(i)
-    val from = if (lensCenterX < 0f) target else lensCenterX
-    lensAnim?.cancel()
-    lensAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-      duration = LENS_ANIM_MS
-      addUpdateListener {
-        val t = it.animatedValue as Float
-        lensCenterX = from + (target - from) * t
-        invalidate()
-      }
-      start()
-    }
-  }
 
   override fun onDraw(canvas: Canvas) {
     super.onDraw(canvas)
@@ -450,7 +434,8 @@ class LTBBarView(context: Context) : View(context) {
         val key = items[idx].key
         // Highlight theo ngón NGAY, nhưng KHÔNG báo JS (USER chốt: đổi màn khi nhả).
         if (key != visualActiveKey()) pendingKey = key
-        lensAnim?.cancel()
+        // Đi theo ngón: gán thẳng, mỗi frame một vị trí. Không còn animator nào để huỷ ở đây —
+        // từ 0.8.3 lens không bao giờ animate, nên không có gì tranh quyền đặt `lensCenterX`.
         lensCenterX = event.x
         invalidate()
         return true
@@ -465,7 +450,8 @@ class LTBBarView(context: Context) : View(context) {
         // Huỷ cũng CHỐT theo ô cuối dưới ngón: người dùng đã thấy highlight ở đó, trả
         // về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
         showPendingKey(key)
-        animateLens()
+        // Nhả tay ⇒ về ô nghỉ TỨC THÌ (USER chốt 30/07). Bản trước trượt 320ms từ chỗ nhả về tâm ô.
+        snapLens()
         invalidate()
         // Đếm NGAY TRƯỚC khi bắn — xem `outstandingEchoes`. Đếm trong `showPendingKey` sẽ
         // lệch pha, vì kéo ngang cũng hiện pending mà KHÔNG báo JS.
@@ -480,7 +466,6 @@ class LTBBarView(context: Context) : View(context) {
   private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
 
   private companion object {
-    const val LENS_ANIM_MS = 320L
     const val DRAG_SLOP_DP = 6f
     /** JS không xác nhận trong khoảng này ⇒ trả highlight về sự thật. */
     const val PENDING_REVERT_MS = 600L

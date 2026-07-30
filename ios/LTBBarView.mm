@@ -3,8 +3,13 @@
 
 static const CGFloat kLensInsetX = 4.0;
 static const CGFloat kLensInsetY = 6.0;
-static const NSTimeInterval kLensAnimDuration = 0.32;
-static const CGFloat kLensSpringDamping = 0.86;
+
+// ⚠️ KHÔNG có hằng thời lượng cho việc lens DỜI CHỖ — cố ý, từ 0.8.3.
+//
+// Bản trước có `kLensAnimDuration = 0.32` + spring damping 0.86 để lens trượt sang ô mới. USER
+// chốt 30/07: đọc thành "chậm", cần TỨC THÌ, không trượt. Xem `layoutLensAndPress:`. Đừng thêm
+// lại một hằng như vậy mà không có yêu cầu mới — thứ còn animate ở nhánh tự vẽ CHỈ là hiệu ứng
+// nhấn (`kLensPress*` bên dưới) và cú vuốt-để-chọn (đi theo ngón, vốn không có animation).
 
 // ── Vuốt-để-chọn (yêu cầu USER 29/07). Lens đi theo ngón LIÊN TỤC; tab chỉ đổi
 // khi NHẢ tay (USER chốt: tránh mount/unmount 4 screen liên tiếp khi kéo một lượt).
@@ -349,7 +354,7 @@ static UIColor *LTBDefaultLensFill(void)
   [self reconfigureItems];
   // Đang kéo thì KHÔNG giật lens về: ngón vẫn đang giữ nó. `setActive` có thể tới
   // giữa lúc kéo (JS đổi tab vì lý do khác) — lúc đó vị trí ngón mới là sự thật thị giác.
-  if (_dragIndex < 0) [self layoutLensAnimated:had];
+  if (_dragIndex < 0) [self layoutLensAndPress:had];
 }
 
 /// Tab mà bar ĐANG VẼ. Khác `_activeKey` khi đang chờ JS xác nhận (tap/nhả vuốt).
@@ -385,7 +390,7 @@ static UIColor *LTBDefaultLensFill(void)
   // ⇒ đếm dư). Nhờ vậy lệch chỉ sống trong một cửa sổ `kPendingRevertDelay`.
   _outstandingEchoes = 0;
   [self reconfigureItems];
-  if (_dragIndex < 0) [self layoutLensAnimated:YES];
+  if (_dragIndex < 0) [self layoutLensAndPress:YES];
 }
 
 - (void)dealloc
@@ -499,7 +504,7 @@ static UIColor *LTBDefaultLensFill(void)
     // này rốt cuộc không chọn gì — đó là cách self-heal, thay cho việc giật lens về ngay
     // ở `onItemPressAborted:` (giật ngay sẽ nháy đúng lúc pan vừa thắng).
     [self showPendingKey:sender.itemKey];
-    [self layoutLensAnimated:YES];
+    [self layoutLensAndPress:YES];
   }
   [self setPressed:YES];
 }
@@ -526,7 +531,7 @@ static UIColor *LTBDefaultLensFill(void)
   [self setPressed:NO];
   // Hiện ngay rồi mới báo JS: chờ vòng bridge thì lens trễ một nhịp so với ngón.
   [self showPendingKey:sender.itemKey];
-  [self layoutLensAnimated:YES];
+  [self layoutLensAndPress:YES];
   // Đếm NGAY TRƯỚC khi bắn, trong cùng nhánh — xem `_outstandingEchoes`. Đếm ở
   // `showPendingKey:` sẽ lệch pha, vì có đường chỉ hiện pending mà không báo JS (kéo ngang
   // trong `onPan`).
@@ -593,14 +598,15 @@ static UIColor *LTBDefaultLensFill(void)
       }
       NSString *key = _items[(NSUInteger)_dragIndex].itemKey ?: @"";
       _dragIndex = -1;
-      // Nhả tay ⇒ thu về. Gán thẳng cờ (không qua `setPressed:`) rồi để
-      // `layoutLensAnimated:` vẽ một animation DUY NHẤT vừa dời chỗ vừa thu — hai
-      // animation chồng nhau ở đây sẽ giật.
+      // Nhả tay ⇒ thu về. Gán thẳng cờ (không qua `setPressed:`) rồi để `layoutLensAndPress:`
+      // lo cả hai: lens về ô nghỉ TỨC THÌ, còn bar thu lại có animation. Không gọi
+      // `setPressed:NO` ở đây vì nó sẽ dựng thêm một khối animation nữa cho cùng transform —
+      // hai khối chồng nhau ở đúng mốc này là chỗ từng giật.
       _pressed = NO;
       // Huỷ/thất bại cũng CHỐT theo ô cuối dưới ngón: người dùng đã thấy highlight ở
       // đó, trả về ô cũ sẽ đọc thành "app ăn mất cú vuốt".
       [self showPendingKey:key];
-      [self layoutLensAnimated:YES];
+      [self layoutLensAndPress:YES];
       if (self.onSelect != nil && key.length > 0) {
         _outstandingEchoes++;
         self.onSelect(key);
@@ -642,7 +648,7 @@ static UIColor *LTBDefaultLensFill(void)
   for (NSUInteger i = 0; i < n; i++) {
     _items[i].frame = CGRectMake(floor(itemW * i), 0, ceil(itemW), b.size.height);
   }
-  [self layoutLensAnimated:NO];
+  [self layoutLensAndPress:NO];
 }
 
 - (UIView *_Nullable)activeLens
@@ -737,7 +743,19 @@ static UIColor *LTBDefaultLensFill(void)
   [self applyCapsuleRadiusTo:lens];
 }
 
-- (void)layoutLensAnimated:(BOOL)animated
+/// Đặt lens về ô nghỉ của tab đang chọn, và đồng bộ transform nhấn của bar.
+///
+/// ⚠️ Tên hàm cố ý KHÔNG còn là `layoutLensAnimated:`: từ 0.8.3, lens dời chỗ **LUÔN TỨC THÌ**
+/// (USER chốt 30/07 — animation 0,32s đọc thành "chậm"). Tham số chỉ còn điều khiển hiệu ứng
+/// NHẤN (cả bar phóng `kBarPressScale` rồi thu), thứ USER giữ lại. Giữ tên cũ là để một cái tên
+/// nói sai nằm lại trong code — đúng lớp lỗi đã ngốn cả ngày 30/07 ở `LiquidTabsModule`
+/// ("lần gọi sau sẽ thử lại").
+///
+/// Vì sao phải TÁCH hai việc thay vì chỉ truyền `animated:NO`: bản trước gán `lens.frame` và
+/// `self.transform` trong CÙNG một khối animation — cố ý, vì lúc nhả vuốt cần "một animation duy
+/// nhất vừa dời chỗ vừa thu" (hai khối chồng nhau thì giật). Tắt khối đó để lens tức thì sẽ tắt
+/// luôn hiệu ứng thu của bar ⇒ mất phản hồi khi chạm, tức làm cả thứ USER KHÔNG yêu cầu.
+- (void)layoutLensAndPress:(BOOL)animatePress
 {
   UIView *lens = [self activeLens];
   if (lens == nil) return;
@@ -759,24 +777,26 @@ static UIColor *LTBDefaultLensFill(void)
                : CGAffineTransformIdentity;
   lens.hidden = NO;
 
-  if (!animated) {
+  // Lens: TỨC THÌ, không điều kiện. Gán ngoài mọi khối animation nên vùng chọn xuất hiện ngay ở
+  // ô mới, không trượt qua các ô giữa. `applyCapsuleRadiusTo:` đi liền vì lúc vừa nhả vuốt lens
+  // đang ở hình NỞ (bẹp dọc) — không gán lại radius thì ra viên thuốc méo.
+  lens.frame = target;
+  [self applyCapsuleRadiusTo:lens];
+
+  if (!animatePress) {
     self.transform = barT;
-    lens.frame = target;
-    [self applyCapsuleRadiusTo:lens];
     return;
   }
-  [UIView animateWithDuration:kLensAnimDuration
+  // Còn animate DUY NHẤT transform của bar — đó chính là hiệu ứng nhấn. Dùng hằng `…Press…`
+  // (không phải hằng lens cũ) vì thứ đang chạy ở đây là hiệu ứng nhấn, không phải dời lens.
+  [UIView animateWithDuration:kLensPressDuration
                         delay:0
-       usingSpringWithDamping:kLensSpringDamping
+       usingSpringWithDamping:kLensPressDamping
         initialSpringVelocity:0
                       options:UIViewAnimationOptionAllowUserInteraction |
                               UIViewAnimationOptionBeginFromCurrentState
                    animations:^{
                      self.transform = barT;
-                     lens.frame = target;
-                     // Trong khối animation ⇒ cornerRadius nội suy cùng frame; gán
-                     // ngoài khối thì hình của lúc kéo nhảy về capsule tức thì.
-                     [self applyCapsuleRadiusTo:lens];
                    }
                    completion:nil];
 }
