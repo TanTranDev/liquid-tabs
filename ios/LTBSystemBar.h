@@ -33,8 +33,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// Bắn khi user chọn một tab. `key` nguyên văn do phía gọi đặt.
 @property (nonatomic, copy, nullable) void (^onSelect)(NSString *key);
 
-/// Gắn vào window (idempotent). Không có `rootViewController` ⇒ không làm gì.
-- (void)attachToWindow:(UIWindow *)window;
+/// Gắn vào window (idempotent). Trả `NO` khi KHÔNG gắn được (chưa có `rootViewController`) —
+/// phía gọi PHẢI coi đó là "lệnh chưa áp được", vì khi chưa gắn thì mọi setter dưới đây no-op.
+///
+/// Vì sao trả `BOOL` chứ không để phía gọi tự đoán: bản trước `void`, nên `LiquidTabsModule` phải
+/// SAO CHÉP tiền đề (`window.rootViewController == nil`) để biết lệnh có áp được không. Ba thứ treo
+/// lên bản sao đó (ý nghĩa của `sys != nil`, reset cờ log-once, hạ `_visiblePending`) ⇒ thêm một
+/// đường bail vào đây là cả ba nói dối cùng lúc, IM LẶNG. Trả kết quả thật thì không còn bản sao.
+- (BOOL)attachToWindow:(UIWindow *)window;
 
 /// Mỗi phần tử: `key`/`label`/`sfSymbol`/`sfSymbolSelected`/`imageUrl`/`badge`.
 - (void)setItems:(NSArray<NSDictionary<NSString *, NSString *> *> *)items;

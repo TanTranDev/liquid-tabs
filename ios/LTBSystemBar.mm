@@ -130,10 +130,13 @@ static const NSTimeInterval kPendingRevertDelay = 0.6;
 
 #pragma mark Attach
 
-- (void)attachToWindow:(UIWindow *)window
+- (BOOL)attachToWindow:(UIWindow *)window
 {
   UIViewController *root = window.rootViewController;
-  if (root == nil) return;  // chưa có root ⇒ để lần gọi sau lo, không dựng nửa vời
+  // Chưa có root ⇒ để lần gọi sau lo, không dựng nửa vời. Trả `NO` để phía gọi biết THẬT, thay vì
+  // phải sao chép điều kiện này (xem doc ở `LTBSystemBar.h`). Thêm đường bail mới ở đây thì cũng
+  // phải `return NO` — đó là toàn bộ hợp đồng.
+  if (root == nil) return NO;
 
   if (_tbc == nil) {
     _tbc = [UITabBarController new];
@@ -146,6 +149,28 @@ static const NSTimeInterval kPendingRevertDelay = 0.6;
     _host.hidden = !_visible;
   }
 
+  // HAI việc, HAI điều kiện — cố ý tách. Gộp chúng vào một `if (_host.superview != root.view)` là
+  // bug: ca hay gặp NHẤT của thư viện này là OTA reload, khi `rootViewController` GIỮ NGUYÊN mà
+  // `root.view` bị thay bằng RCTRootView mới (đúng premise ghi ở `LiquidTabsModule.h`). Lúc đó
+  // superview lệch nên khối chạy, nhưng `_tbc.parentViewController` VẪN là `root` ⇒ nếu
+  // `addChildViewController:` nằm trong khối đó thì `_tbc` bị thêm làm child của CHÍNH `root` lần
+  // thứ hai (UIKit không dedupe) ⇒ `childViewControllers` chứa nó hai lần, trait/safe-area/
+  // appearance bị đẩy trùng, và `removeFromParentViewController` sau này chỉ gỡ được một entry.
+  // Bản trước gộp và vì thế chỉ phủ ca "root ĐỔI" — ca ít gặp hơn.
+
+  // (1) Containment: chỉ khi parent THẬT SỰ khác.
+  if (_tbc.parentViewController != root) {
+    if (_tbc.parentViewController != nil) {
+      [_tbc willMoveToParentViewController:nil];
+      [_tbc.view removeFromSuperview];
+      // `removeFromParentViewController` tự gọi `didMoveToParentViewController:nil`.
+      [_tbc removeFromParentViewController];
+    }
+    [root addChildViewController:_tbc];
+    [_tbc didMoveToParentViewController:root];
+  }
+
+  // (2) Cây view: khi `root.view` đổi (gồm cả ca OTA ở trên).
   if (_host.superview != root.view) {
     [_host removeFromSuperview];
     [root.view addSubview:_host];
@@ -156,10 +181,13 @@ static const NSTimeInterval kPendingRevertDelay = 0.6;
       [_host.topAnchor constraintEqualToAnchor:root.view.topAnchor],
       [_host.bottomAnchor constraintEqualToAnchor:root.view.bottomAnchor],
     ]];
+  }
 
-    // Child VC thật sự: thiếu bước này thì trait/safe-area/rotation của `_tbc` không được
-    // truyền đúng, và tab bar hệ thống tính sai vị trí.
-    [root addChildViewController:_tbc];
+  // `_tbc.view` chỉ cần gắn vào `_host` MỘT lần — `_host` đi theo `_tbc` nên quan hệ này không đổi
+  // khi root/root.view đổi. Gắn lại vô điều kiện là tích luỹ 4 constraint trùng mỗi lần reload
+  // (trùng nhau nên KHÔNG có warning — im lặng).
+  if (_tbc.view.superview != _host) {
+    [_tbc.view removeFromSuperview];
     _tbc.view.translatesAutoresizingMaskIntoConstraints = NO;
     [_host addSubview:_tbc.view];
     [NSLayoutConstraint activateConstraints:@[
@@ -168,11 +196,11 @@ static const NSTimeInterval kPendingRevertDelay = 0.6;
       [_tbc.view.topAnchor constraintEqualToAnchor:_host.topAnchor],
       [_tbc.view.bottomAnchor constraintEqualToAnchor:_host.bottomAnchor],
     ]];
-    [_tbc didMoveToParentViewController:root];
   }
 
   // Luôn ở trên cùng: RN có thể thêm view (modal, overlay) sau khi bar đã gắn.
   [root.view bringSubviewToFront:_host];
+  return YES;
 }
 
 #pragma mark Items

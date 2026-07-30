@@ -22,10 +22,15 @@ Rồi khai vào `shared` của Module Federation ở **cả host và mini-app**:
   singleton: true,
   eager: false,
   import: false,          // ⚠️ BẮT BUỘC — xem dưới
-  requiredVersion: '^0.1.0',
-  version: '0.1.0',
+  requiredVersion: '0.8.2',   // ⚠️ KHÔNG dùng caret — xem dưới
+  version: '0.8.2',
 },
 ```
+
+⚠️ **Đừng dùng `^` cho version 0.x.** Trên major 0, `^0.8.2` chỉ khớp `0.8.x` — bump minor
+(`0.9.0`) là host không còn thoả `requiredVersion`, và MF **không nổ**: nó chỉ resolve fail, phía
+gọi nhận `null` rồi **âm thầm** rơi về bar tự vẽ. Hiện tượng là "iOS 26 tự nhiên không có bar
+kính", trông hợp lý nên không ai nghi. Pin **đúng version** và bump đồng thời ở cả hai chỗ.
 
 > ⚠️ **`import: false` không phải tuỳ chọn.** Đây là package có **view native**.
 > Nếu mini-app bundle bản riêng của nó, view sẽ được đăng ký **hai lần** với host
